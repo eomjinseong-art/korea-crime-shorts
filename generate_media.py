@@ -1,149 +1,95 @@
 """
-1일 1쇼츠 자동화 파이프라인 - 5단계: 음성(TTS) + 캐릭터 이미지 생성
+1일 1쇼츠 자동화 파이프라인 - 4단계: 대본 생성
 
-generate_script.py가 만든 output/script_{date}.json (대사 turn 리스트)을 입력으로 받아,
-1) 각 대사를 화자별 목소리로 TTS 생성 (ElevenLabs)
-2) 각 대사에 맞는 캐릭터 이미지 생성 (OpenAI images edit - 고정 레퍼런스 이미지 기반)
-을 수행하고, 6단계(영상 조립)가 바로 쓸 수 있는 manifest.json을 만든다.
+collect_news.py가 만든 output/facts_{date}.json (사실관계 5W1H)을 입력으로 받아,
+'편의점 알바생 + 택시기사' 두 사람의 대화 형식 영어 대본을 생성한다.
 
-사전 준비물 (중요):
-  assets/character_refs/ 아래에 캐릭터별 레퍼런스 이미지를 미리 넣어둬야 한다.
-    - assets/character_refs/clerk_voice.png       (알바생)
-    - assets/character_refs/customer_taxi_voice.png
-    - assets/character_refs/customer_student_voice.png
-    - assets/character_refs/customer_worker_voice.png
-  레퍼런스 이미지는 캐릭터 컨셉이 확정되면 한 번만 만들어서 고정해두는 게 핵심이다.
-  (이 스크립트는 매번 새로 그리지 않고, 이 레퍼런스를 기반으로 표정/포즈만 살짝 바꾼다.)
+캐릭터/톤/캐치프레이즈 등은 이 파일이 아니라 리포지토리 루트의 config.json에서
+관리한다. 대시보드에서 config.json을 직접 수정할 수 있어서, 캐릭터를 바꾸고
+싶으면 이 코드가 아니라 config.json만 고치면 된다.
+
+출력은 화자별 대사 리스트(JSON)이며, 5단계(음성 생성)에서 화자별로 다른 TTS
+보이스를 매핑하는 데 그대로 쓸 수 있다.
 
 필요 환경변수:
-  ELEVENLABS_API_KEY
-  OPENAI_API_KEY
+  ANTHROPIC_API_KEY
 
 필요 패키지:
-  pip install requests --break-system-packages
-
-주의: 이 컨테이너는 네트워크가 막혀 있어서 실제 호출은 사용자의 실행 환경(로컬/GitHub
-Actions)에서 진행해야 한다.
+  pip install anthropic --break-system-packages
 """
 
 import os
 import json
-import base64
 import datetime as dt
 
-import requests
+from anthropic import Anthropic
 
-# ---------------------------------------------------------------------------
-# 설정
-# ---------------------------------------------------------------------------
-
+CONFIG_PATH = "config.json"
+FACTS_PATH_TEMPLATE = "output/facts_{date}.json"
 SCRIPT_PATH_TEMPLATE = "output/script_{date}.json"
-AUDIO_DIR_TEMPLATE = "output/audio_{date}"
-IMAGE_DIR_TEMPLATE = "output/images_{date}"
-MANIFEST_PATH_TEMPLATE = "output/manifest_{date}.json"
-
-CHARACTER_REF_DIR = "assets/character_refs"
-
-# 내부 voice_id -> 실제 ElevenLabs voice_id. 콘솔에서 캐릭터 목소리를 만든 뒤 채워 넣으세요.
-ELEVENLABS_VOICE_MAP = {
-    "clerk_voice": "5DWGv3VDkihNUcbvaonB",
-    "customer_taxi_voice": "CxErO97xpQgQXYmapDKX",
-    "customer_student_voice": "70DeQK5Ztp7WmEGGysLT",
-    "customer_worker_voice": "mK6Q1HRYYwUJwQGwMPYw",
-}
-
-ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
-
-IMAGE_SIZE = "1024x1536"  # 쇼츠 세로 비율에 가까운 사이즈
 
 
 # ---------------------------------------------------------------------------
-# TTS
+# 설정 로드
 # ---------------------------------------------------------------------------
 
-def generate_tts(text: str, internal_voice_id: str, out_path: str, api_key: str) -> None:
-    real_voice_id = ELEVENLABS_VOICE_MAP.get(internal_voice_id)
-    if not real_voice_id or real_voice_id.startswith("REPLACE_WITH"):
-        raise ValueError(
-            f"'{internal_voice_id}'에 해당하는 ElevenLabs voice_id가 설정되지 않았습니다. "
-            "ELEVENLABS_VOICE_MAP을 채워주세요."
-        )
-
-    resp = requests.post(
-        ELEVENLABS_TTS_URL.format(voice_id=real_voice_id),
-        headers={
-            "xi-api-key": api_key,
-            "content-type": "application/json",
-        },
-        json={
-            "text": text,
-            "model_id": "eleven_multilingual_v2",
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(resp.content)
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        raise SystemExit(f"{CONFIG_PATH} 가 없습니다. 리포지토리 루트에 config.json을 두세요.")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ---------------------------------------------------------------------------
-# 이미지 생성 (레퍼런스 이미지 기반 - 캐릭터 일관성 유지)
+# 대본 생성
 # ---------------------------------------------------------------------------
 
-def build_scene_prompt(character_name: str, line: str) -> str:
-    """대사 내용에 맞춰 표정/포즈 디렉션만 살짝 바꾸는 프롬프트.
-    캐릭터 자체의 외형은 레퍼런스 이미지가 고정해주므로 여기서는 장면 지시만 준다."""
+def build_system_prompt(config: dict) -> str:
+    clerk = config["clerk"]
+    customer = config["customer"]
+    catchphrase = config["catchphrase"]
+    target_word_count = config.get("target_word_count", "130-150")
+
     return (
-        f"Same character as the reference image, in a Korean convenience store. "
-        f"Keep the exact same face, hairstyle, and outfit as the reference. "
-        f"Adjust only the expression and pose to match this line naturally: \"{line}\". "
-        f"Vertical 9:16 composition, flat clean lighting, no text overlay."
+        "당신은 영어권 해외 시청자를 위한 유튜브 쇼츠 대본 작가입니다. "
+        "한국 편의점을 배경으로, 알바생과 손님 두 사람의 짧은 대화 형식으로 "
+        "오늘의 사건 사실관계를 자연스럽게 전달하는 60초 이내 영어 대본을 씁니다.\n\n"
+        f"등장인물:\n"
+        f"1) {clerk['name']} (speaker id: clerk) - {clerk['persona']}\n"
+        f"2) {customer['name']} (speaker id: customer) - {customer['persona']}\n\n"
+        "작성 규칙:\n"
+        "1. 입력으로 주어지는 사실관계 외의 사실을 지어내지 마세요.\n"
+        "2. 기사 원문 표현을 그대로 쓰지 말고, 대화체로 완전히 새로 쓰세요.\n"
+        "3. 실명이 있다면 익명 표현으로 바꾸세요 (예: '30대 남성').\n"
+        "4. 대화는 계산대에서 스몰토크로 시작 -> 손님이 사건을 언급 -> "
+        "알바생이 되묻거나 팩폭 리액션 -> 사실관계 자연스럽게 전달 -> "
+        f"알바생이 아래 캐치프레이즈로 마무리하는 흐름을 따르세요: \"{catchphrase}\"\n"
+        f"5. 전체 대사 총합은 영어 단어 기준 {target_word_count}단어 내외로 하세요.\n"
+        "6. 반드시 JSON만 출력하세요. 다른 설명이나 마크다운은 포함하지 마세요.\n"
+        "7. 출력 스키마: {\"turns\": [{\"speaker\": \"clerk\"|\"customer\", "
+        "\"line\": str}, ...]}"
     )
 
 
-def generate_character_image(internal_voice_id: str, character_name: str,
-                              line: str, out_path: str, api_key: str) -> None:
-    ref_path = os.path.join(CHARACTER_REF_DIR, f"{internal_voice_id}.png")
-    if not os.path.exists(ref_path):
-        raise FileNotFoundError(
-            f"레퍼런스 이미지가 없습니다: {ref_path}. "
-            "캐릭터 시트를 먼저 assets/character_refs/ 에 준비해주세요."
-        )
+def generate_dialogue(client: Anthropic, facts: dict, config: dict) -> dict:
+    system_prompt = build_system_prompt(config)
+    user_content = json.dumps(facts, ensure_ascii=False)
 
-    prompt = build_scene_prompt(character_name, line)
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=800,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+    )
 
-    last_error = None
-    for attempt in range(1, 3):  # 최대 2회 시도 (첫 시도 + 재시도 1회)
-        try:
-            with open(ref_path, "rb") as ref_file:
-                resp = requests.post(
-                    OPENAI_IMAGE_EDIT_URL,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    files={"image": ref_file},
-                    data={"model": "gpt-image-1", "prompt": prompt, "size": IMAGE_SIZE, "n": 1},
-                    timeout=180,
-                )
-            if not resp.ok:
-                raise RuntimeError(
-                    f"OpenAI 이미지 편집 요청 실패: HTTP {resp.status_code} - {resp.text[:500]}"
-                )
-            data = resp.json()
-            b64_image = data["data"][0]["b64_json"]
-            break
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-            last_error = e
-            print(f"  [경고] 이미지 요청 시도 {attempt}회차 실패({type(e).__name__}), 재시도합니다...")
-    else:
-        raise RuntimeError(f"이미지 생성이 재시도 후에도 실패했습니다: {last_error}")
+    raw = "".join(block.text for block in message.content if block.type == "text")
+    raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+    data = json.loads(raw)
 
+    if "turns" not in data or not isinstance(data["turns"], list):
+        raise ValueError(f"예상치 못한 응답 형식: {data}")
 
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(base64.b64decode(b64_image))
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -151,60 +97,61 @@ def generate_character_image(internal_voice_id: str, character_name: str,
 # ---------------------------------------------------------------------------
 
 def main():
-    eleven_key = os.environ.get("ELEVENLABS_API_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    if not eleven_key or not openai_key:
-        raise SystemExit("ELEVENLABS_API_KEY와 OPENAI_API_KEY 환경변수가 모두 필요합니다.")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise SystemExit("ANTHROPIC_API_KEY 환경변수가 필요합니다.")
 
+    client = Anthropic(api_key=api_key)
     today = dt.date.today().isoformat()
-    script_path = SCRIPT_PATH_TEMPLATE.format(date=today)
-    if not os.path.exists(script_path):
-        raise SystemExit(f"{script_path} 가 없습니다. generate_script.py를 먼저 실행하세요.")
+    config = load_config()
 
-    with open(script_path, "r", encoding="utf-8") as f:
-        script = json.load(f)
+    facts_path = FACTS_PATH_TEMPLATE.format(date=today)
+    if not os.path.exists(facts_path):
+        raise SystemExit(f"{facts_path} 가 없습니다. collect_news.py를 먼저 실행하세요.")
 
-    audio_dir = AUDIO_DIR_TEMPLATE.format(date=today)
-    image_dir = IMAGE_DIR_TEMPLATE.format(date=today)
+    with open(facts_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    facts = payload["selected_facts"]
 
-    manifest_turns = []
+    print("[1/1] 대화 대본 생성 중...")
+    dialogue = generate_dialogue(client, facts, config)
 
-    for i, turn in enumerate(script["turns"]):
-        voice_id = turn["voice_id"]
-        character_name = turn["character_name"]
-        line = turn["line"]
+    clerk = config["clerk"]
+    customer = config["customer"]
+    speaker_map = {
+        "clerk": {"name": clerk["name"], "voice_id": clerk["voice_id"]},
+        "customer": {"name": customer["name"], "voice_id": customer["voice_id"]},
+    }
+    for turn in dialogue["turns"]:
+        turn["character_name"] = speaker_map[turn["speaker"]]["name"]
+        turn["voice_id"] = speaker_map[turn["speaker"]]["voice_id"]
 
-        audio_path = os.path.join(audio_dir, f"{i:02d}_{voice_id}.mp3")
-        image_path = os.path.join(image_dir, f"{i:02d}_{voice_id}.png")
+    # 손님의 첫 대사(보통 사건을 언급하는 훅 문장)를 제목으로 쓴다.
+    # 인트로 타이틀 카드, 썸네일, 유튜브 업로드 제목이 전부 이 값을 그대로 같이 쓴다.
+    hook_line = next((t["line"] for t in dialogue["turns"] if t["speaker"] == "customer"),
+                      dialogue["turns"][0]["line"])
+    title = hook_line.rstrip("?.! ")
+    if len(title) > 90:
+        title = title[:87] + "..."
+    title = f"{title}?"
 
-        print(f"[{i+1}/{len(script['turns'])}] {character_name}: {line[:30]}...")
-
-        print("  음성 생성 중...")
-        generate_tts(line, voice_id, audio_path, eleven_key)
-
-        print("  이미지 생성 중...")
-        generate_character_image(voice_id, character_name, line, image_path, openai_key)
-
-        manifest_turns.append({
-            "index": i,
-            "speaker": turn["speaker"],
-            "character_name": character_name,
-            "line": line,
-            "audio_path": audio_path,
-            "image_path": image_path,
-        })
-
-    manifest = {
+    output = {
         "date": today,
-        "customer_character": script["customer_character"],
-        "turns": manifest_turns,
+        "title": title,
+        "customer_character": customer["name"],
+        "customer_character_en": customer["name_en"],
+        "source_link": facts.get("source_link"),
+        "turns": dialogue["turns"],
     }
 
-    manifest_path = MANIFEST_PATH_TEMPLATE.format(date=today)
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    os.makedirs("output", exist_ok=True)
+    out_path = SCRIPT_PATH_TEMPLATE.format(date=today)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
 
-    print(f"완료: {manifest_path}")
+    print(f"완료: {out_path}")
+    total_words = sum(len(t["line"].split()) for t in dialogue["turns"])
+    print(f"총 대사 단어 수: {total_words}")
 
 
 if __name__ == "__main__":
