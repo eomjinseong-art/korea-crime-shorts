@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>야간매점 자동화 콘솔</title>
+<style>
+  :root{
+    --bg:#0B0D10; --panel:#14171C; --panel-2:#1B1F26; --border:#2A2F38;
+    --text:#E8E6E0; --text-dim:#8B8880; --amber:#F2B33D; --amber-dim:#8A661F;
+    --green:#5DCB8F; --red:#E2574C; --mono:'JetBrains Mono',ui-monospace,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Pretendard,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
+    padding:32px 20px 80px; line-height:1.6;
+  }
+  .wrap{max-width:760px; margin:0 auto;}
+  .sign{
+    display:flex; align-items:center; gap:10px; margin-bottom:6px;
+  }
+  .dot{width:9px; height:9px; border-radius:50%; background:var(--text-dim); flex-shrink:0;}
+  .dot.ok{background:var(--green); box-shadow:0 0 8px var(--green);}
+  .dot.bad{background:var(--red); box-shadow:0 0 8px var(--red);}
+  h1{font-size:20px; font-weight:600; margin:0; letter-spacing:0.3px;}
+  .sub{color:var(--text-dim); font-size:13px; margin:0 0 28px;}
+  .panel{
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:20px; margin-bottom:16px;
+  }
+  .panel h2{
+    font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:0.6px;
+    color:var(--text-dim); margin:0 0 16px;
+  }
+  .row{display:flex; gap:10px; margin-bottom:10px;}
+  .row input{flex:1;}
+  input[type=text], input[type=password]{
+    width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    padding:9px 11px; border-radius:6px; font-size:13px; font-family:var(--mono);
+  }
+  input::placeholder{color:var(--text-dim);}
+  label{display:block; font-size:12px; color:var(--text-dim); margin-bottom:5px;}
+  .field{margin-bottom:12px;}
+  button{
+    font-family:var(--sans); font-size:13px; font-weight:600; border:none; border-radius:6px;
+    padding:9px 16px; cursor:pointer; transition:opacity .15s;
+  }
+  button:hover{opacity:0.85;}
+  button:disabled{opacity:0.35; cursor:not-allowed;}
+  .btn-primary{background:var(--amber); color:#1A1300;}
+  .btn-ghost{background:var(--panel-2); color:var(--text); border:1px solid var(--border);}
+  .btn-run{
+    width:100%; background:var(--amber); color:#1A1300; font-size:15px; padding:14px;
+    border-radius:8px;
+  }
+  .checklist{display:flex; flex-direction:column; gap:0;}
+  .check-item{
+    display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid var(--border);
+    font-size:13px;
+  }
+  .check-item:last-child{border-bottom:none;}
+  .check-mark{
+    width:18px; height:18px; border-radius:5px; flex-shrink:0; display:flex; align-items:center;
+    justify-content:center; font-size:11px; font-family:var(--mono);
+    background:var(--panel-2); border:1px solid var(--border); color:var(--text-dim);
+  }
+  .check-mark.ok{background:rgba(93,203,143,0.15); border-color:var(--green); color:var(--green);}
+  .check-mark.bad{background:rgba(226,87,76,0.12); border-color:var(--red); color:var(--red);}
+  .check-label{flex:1; color:var(--text);}
+  .check-optional{color:var(--text-dim); font-size:11px;}
+  .secret-row{display:flex; gap:8px; align-items:center; margin-bottom:8px;}
+  .secret-row input{flex:1;}
+  .secret-row button{white-space:nowrap; padding:9px 12px; font-size:12px;}
+  .run-row{display:flex; gap:10px; align-items:center; margin-bottom:14px;}
+  .run-row label{margin:0; white-space:nowrap;}
+  .run-row input{max-width:120px;}
+  .runs{display:flex; flex-direction:column; gap:8px;}
+  .run-card{
+    display:flex; align-items:center; gap:10px; padding:10px 12px; background:var(--panel-2);
+    border:1px solid var(--border); border-radius:8px; font-size:12px; font-family:var(--mono);
+  }
+  .run-status{
+    padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; flex-shrink:0;
+  }
+  .run-status.success{background:rgba(93,203,143,0.15); color:var(--green);}
+  .run-status.failure{background:rgba(226,87,76,0.15); color:var(--red);}
+  .run-status.progress{background:rgba(242,179,61,0.15); color:var(--amber);}
+  .run-status.other{background:var(--panel); color:var(--text-dim);}
+  .run-time{color:var(--text-dim); flex:1;}
+  .run-link{color:var(--amber); text-decoration:none;}
+  .run-link:hover{text-decoration:underline;}
+  .msg{font-size:12px; margin-top:10px; padding:9px 11px; border-radius:6px; font-family:var(--mono);}
+  .msg.error{background:rgba(226,87,76,0.1); color:var(--red); border:1px solid rgba(226,87,76,0.3);}
+  .msg.success{background:rgba(93,203,143,0.1); color:var(--green); border:1px solid rgba(93,203,143,0.3);}
+  .msg.info{background:var(--panel-2); color:var(--text-dim); border:1px solid var(--border);}
+  .hint{font-size:11px; color:var(--text-dim); margin-top:10px;}
+  .hint a{color:var(--amber);}
+  .empty{color:var(--text-dim); font-size:13px; text-align:center; padding:16px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="sign">
+    <span class="dot" id="conn-dot"></span>
+    <h1>야간매점 자동화 콘솔</h1>
+  </div>
+  <p class="sub">1일 1쇼츠 파이프라인 상태를 확인하고, 준비가 끝나면 실행 버튼 하나로 돌립니다.</p>
+
+  <!-- 연결 설정 -->
+  <div class="panel">
+    <h2>리포지토리 연결</h2>
+    <div class="field">
+      <label>owner/repo (예: myname/shorts-pipeline)</label>
+      <input type="text" id="repo-input" placeholder="owner/repo">
+    </div>
+    <div class="field">
+      <label>GitHub Personal Access Token (repo, workflow 권한 필요)</label>
+      <input type="password" id="pat-input" placeholder="ghp_...">
+    </div>
+    <button class="btn-primary" id="connect-btn">연결 확인</button>
+    <div id="connect-msg"></div>
+    <p class="hint">토큰은 이 페이지를 여신 브라우저에만 저장되며, 어디로도 전송되지 않습니다 (GitHub API 호출 시에만 사용).</p>
+  </div>
+
+  <!-- 준비물 체크리스트 -->
+  <div class="panel" id="checklist-panel" style="display:none;">
+    <h2>준비물 체크</h2>
+    <div class="checklist" id="checklist"></div>
+    <button class="btn-ghost" id="recheck-btn" style="margin-top:14px;">다시 확인</button>
+  </div>
+
+  <!-- 시크릿 입력 -->
+  <div class="panel" id="secrets-panel" style="display:none;">
+    <h2>시크릿 입력 / 갱신</h2>
+    <div id="secret-fields"></div>
+    <div id="secrets-msg"></div>
+  </div>
+
+  <!-- 실행 -->
+  <div class="panel" id="run-panel" style="display:none;">
+    <h2>실행</h2>
+    <div class="run-row">
+      <label>브랜치</label>
+      <input type="text" id="branch-input" value="main">
+      <button class="btn-ghost" id="refresh-runs-btn">최근 실행 새로고침</button>
+    </div>
+    <button class="btn-run" id="run-btn">지금 실행</button>
+    <div id="run-msg"></div>
+  </div>
+
+  <!-- 최근 실행 이력 -->
+  <div class="panel" id="history-panel" style="display:none;">
+    <h2>최근 실행</h2>
+    <div class="runs" id="runs-list"><div class="empty">아직 조회한 실행 이력이 없습니다.</div></div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/libsodium-wrappers/0.7.15/sodium.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  var REQUIRED_SECRETS = [
+    {name:"ANTHROPIC_API_KEY", label:"Claude API 키"},
+    {name:"ELEVENLABS_API_KEY", label:"ElevenLabs API 키"},
+    {name:"OPENAI_API_KEY", label:"OpenAI API 키 (이미지 생성)"},
+    {name:"YOUTUBE_CLIENT_SECRET_JSON", label:"YouTube client_secret.json 내용"},
+    {name:"YOUTUBE_TOKEN_JSON", label:"YouTube token.json 내용"},
+    {name:"SLACK_WEBHOOK_URL", label:"Slack 웹훅 URL", optional:true},
+  ];
+
+  var REQUIRED_ASSETS = [
+    {path:"assets/character_refs/clerk_voice.png", label:"알바생 레퍼런스 이미지"},
+    {path:"assets/character_refs/customer_taxi_voice.png", label:"손님(택시기사) 레퍼런스 이미지"},
+    {path:"assets/character_refs/customer_student_voice.png", label:"손님(취준생) 레퍼런스 이미지"},
+    {path:"assets/character_refs/customer_worker_voice.png", label:"손님(야간근무자) 레퍼런스 이미지"},
+    {path:"assets/bgm.mp3", label:"배경음악", optional:true},
+  ];
+
+  var WORKFLOW_FILE = "daily_shorts.yml";
+
+  var state = { owner:"", repo:"", pat:"", connected:false };
+
+  // --- 저장소(claude.ai 아티팩트 안이면 window.storage, 독립 실행이면 localStorage로 대체) ---
+  async function storeGet(key){
+    try{
+      if (window.storage){ var r = await window.storage.get(key, false); return r ? r.value : null; }
+    }catch(e){}
+    try{ return localStorage.getItem(key); }catch(e){ return null; }
+  }
+  async function storeSet(key, value){
+    try{
+      if (window.storage){ await window.storage.set(key, value, false); return; }
+    }catch(e){}
+    try{ localStorage.setItem(key, value); }catch(e){}
+  }
+
+  function el(id){ return document.getElementById(id); }
+
+  function showMsg(container, text, type){
+    container.innerHTML = '<div class="msg ' + type + '">' + text + '</div>';
+  }
+
+  // --- GitHub API 호출 ---
+  async function gh(path, options){
+    options = options || {};
+    var headers = Object.assign({
+      "Authorization": "Bearer " + state.pat,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    }, options.headers || {});
+    return fetch("https://api.github.com" + path, Object.assign({}, options, {headers: headers}));
+  }
+
+  // --- 연결 확인 ---
+  el("connect-btn").addEventListener("click", async function(){
+    var repoVal = el("repo-input").value.trim();
+    var patVal = el("pat-input").value.trim();
+    var msgBox = el("connect-msg");
+
+    var parts = repoVal.split("/");
+    if (parts.length !== 2 || !patVal){
+      showMsg(msgBox, "owner/repo 형식과 토큰을 모두 입력하세요.", "error");
+      return;
+    }
+    state.owner = parts[0]; state.repo = parts[1]; state.pat = patVal;
+
+    showMsg(msgBox, "연결 확인 중...", "info");
+    try{
+      var res = await gh("/repos/" + state.owner + "/" + state.repo);
+      if (!res.ok){
+        state.connected = false;
+        el("conn-dot").className = "dot bad";
+        showMsg(msgBox, "연결 실패 (" + res.status + "). owner/repo 또는 토큰 권한을 확인하세요.", "error");
+        return;
+      }
+      state.connected = true;
+      el("conn-dot").className = "dot ok";
+      showMsg(msgBox, "연결됨: " + state.owner + "/" + state.repo, "success");
+
+      await storeSet("gh_config", JSON.stringify({owner: state.owner, repo: state.repo, pat: state.pat}));
+
+      el("checklist-panel").style.display = "block";
+      el("secrets-panel").style.display = "block";
+      el("run-panel").style.display = "block";
+      el("history-panel").style.display = "block";
+
+      buildSecretFields();
+      await runChecklist();
+      await refreshRuns();
+    }catch(e){
+      state.connected = false;
+      el("conn-dot").className = "dot bad";
+      showMsg(msgBox, "요청 중 오류: " + e.message + " (네트워크가 막혀있다면 이 파일을 다운로드해서 브라우저로 직접 열어보세요)", "error");
+    }
+  });
+
+  // --- 준비물 체크리스트 ---
+  async function runChecklist(){
+    var box = el("checklist");
+    box.innerHTML = '<div class="empty">확인 중...</div>';
+    var items = [];
+
+    var existingSecretNames = new Set();
+    try{
+      var secRes = await gh("/repos/" + state.owner + "/" + state.repo + "/actions/secrets");
+      if (secRes.ok){
+        var secData = await secRes.json();
+        (secData.secrets || []).forEach(function(s){ existingSecretNames.add(s.name); });
+      }
+    }catch(e){}
+
+    REQUIRED_SECRETS.forEach(function(s){
+      items.push({
+        label: "시크릿: " + s.label,
+        ok: existingSecretNames.has(s.name),
+        optional: !!s.optional,
+      });
+    });
+
+    for (var i=0; i<REQUIRED_ASSETS.length; i++){
+      var a = REQUIRED_ASSETS[i];
+      var ok = false;
+      try{
+        var r = await gh("/repos/" + state.owner + "/" + state.repo + "/contents/" + a.path);
+        ok = r.ok;
+      }catch(e){}
+      items.push({label: "파일: " + a.label, ok: ok, optional: !!a.optional});
+    }
+
+    box.innerHTML = "";
+    items.forEach(function(it){
+      var row = document.createElement("div");
+      row.className = "check-item";
+      var mark = document.createElement("div");
+      mark.className = "check-mark " + (it.ok ? "ok" : "bad");
+      mark.textContent = it.ok ? "OK" : "X";
+      var label = document.createElement("div");
+      label.className = "check-label";
+      label.textContent = it.label;
+      row.appendChild(mark);
+      row.appendChild(label);
+      if (it.optional){
+        var opt = document.createElement("span");
+        opt.className = "check-optional";
+        opt.textContent = "선택";
+        row.appendChild(opt);
+      }
+      box.appendChild(row);
+    });
+  }
+  el("recheck-btn").addEventListener("click", runChecklist);
+
+  // --- 시크릿 입력 필드 구성 ---
+  function buildSecretFields(){
+    var container = el("secret-fields");
+    container.innerHTML = "";
+    REQUIRED_SECRETS.forEach(function(s){
+      var row = document.createElement("div");
+      row.className = "secret-row";
+
+      var input = document.createElement("input");
+      input.type = "password";
+      input.placeholder = s.label + (s.optional ? " (선택)" : "");
+      input.id = "secret-" + s.name;
+
+      var btn = document.createElement("button");
+      btn.className = "btn-ghost";
+      btn.textContent = "저장";
+      btn.addEventListener("click", async function(){
+        var val = input.value.trim();
+        if (!val){ return; }
+        btn.disabled = true; btn.textContent = "저장 중...";
+        var ok = await setSecret(s.name, val);
+        btn.disabled = false; btn.textContent = "저장";
+        var msgBox = el("secrets-msg");
+        if (ok){
+          showMsg(msgBox, s.name + " 저장 완료.", "success");
+          input.value = "";
+          runChecklist();
+        } else {
+          showMsg(msgBox, s.name + " 저장 실패. 토큰에 secrets 쓰기 권한이 있는지 확인하세요.", "error");
+        }
+      });
+
+      row.appendChild(input);
+      row.appendChild(btn);
+      container.appendChild(row);
+    });
+  }
+
+  // --- 시크릿 암호화 후 저장 (GitHub 공개키로 libsodium seal box) ---
+  async function setSecret(name, value){
+    try{
+      var keyRes = await gh("/repos/" + state.owner + "/" + state.repo + "/actions/secrets/public-key");
+      if (!keyRes.ok) return false;
+      var keyData = await keyRes.json();
+
+      await sodium.ready;
+      var binkey = sodium.from_base64(keyData.key, sodium.base64_variants.ORIGINAL);
+      var binsec = sodium.from_string(value);
+      var encBytes = sodium.crypto_box_seal(binsec, binkey);
+      var encryptedValue = sodium.to_base64(encBytes, sodium.base64_variants.ORIGINAL);
+
+      var putRes = await gh("/repos/" + state.owner + "/" + state.repo + "/actions/secrets/" + name, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({encrypted_value: encryptedValue, key_id: keyData.key_id}),
+      });
+      return putRes.ok;
+    }catch(e){
+      console.error(e);
+      return false;
+    }
+  }
+
+  // --- 실행 트리거 ---
+  el("run-btn").addEventListener("click", async function(){
+    var branch = el("branch-input").value.trim() || "main";
+    var msgBox = el("run-msg");
+    var btn = el("run-btn");
+    btn.disabled = true; btn.textContent = "요청 중...";
+    try{
+      var res = await gh("/repos/" + state.owner + "/" + state.repo + "/actions/workflows/" + WORKFLOW_FILE + "/dispatches", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ref: branch}),
+      });
+      if (res.ok || res.status === 204){
+        showMsg(msgBox, "실행을 요청했습니다. 잠시 후 아래 실행 이력에 나타납니다.", "success");
+        setTimeout(refreshRuns, 4000);
+      } else {
+        showMsg(msgBox, "실행 요청 실패 (" + res.status + "). 브랜치명과 워크플로우 파일 경로를 확인하세요.", "error");
+      }
+    }catch(e){
+      showMsg(msgBox, "요청 중 오류: " + e.message, "error");
+    }
+    btn.disabled = false; btn.textContent = "지금 실행";
+  });
+
+  // --- 실행 이력 조회 ---
+  async function refreshRuns(){
+    var list = el("runs-list");
+    try{
+      var res = await gh("/repos/" + state.owner + "/" + state.repo + "/actions/workflows/" + WORKFLOW_FILE + "/runs?per_page=5");
+      if (!res.ok){
+        list.innerHTML = '<div class="empty">실행 이력을 불러오지 못했습니다.</div>';
+        return;
+      }
+      var data = await res.json();
+      var runs = data.workflow_runs || [];
+      if (runs.length === 0){
+        list.innerHTML = '<div class="empty">아직 실행 이력이 없습니다.</div>';
+        return;
+      }
+      list.innerHTML = "";
+      runs.forEach(function(run){
+        var card = document.createElement("div");
+        card.className = "run-card";
+
+        var statusClass = "other";
+        var statusText = run.status;
+        if (run.status === "in_progress" || run.status === "queued"){
+          statusClass = "progress"; statusText = "진행중";
+        } else if (run.conclusion === "success"){
+          statusClass = "success"; statusText = "성공";
+        } else if (run.conclusion === "failure"){
+          statusClass = "failure"; statusText = "실패";
+        } else if (run.conclusion){
+          statusText = run.conclusion;
+        }
+
+        var statusEl = document.createElement("span");
+        statusEl.className = "run-status " + statusClass;
+        statusEl.textContent = statusText;
+
+        var timeEl = document.createElement("span");
+        timeEl.className = "run-time";
+        timeEl.textContent = new Date(run.created_at).toLocaleString("ko-KR");
+
+        var linkEl = document.createElement("a");
+        linkEl.className = "run-link";
+        linkEl.href = run.html_url;
+        linkEl.target = "_blank";
+        linkEl.rel = "noopener";
+        linkEl.textContent = "로그 보기";
+
+        card.appendChild(statusEl);
+        card.appendChild(timeEl);
+        card.appendChild(linkEl);
+        list.appendChild(card);
+      });
+
+      var hasInProgress = runs.some(function(r){ return r.status === "in_progress" || r.status === "queued"; });
+      if (hasInProgress){ setTimeout(refreshRuns, 15000); }
+    }catch(e){
+      list.innerHTML = '<div class="empty">실행 이력을 불러오는 중 오류가 발생했습니다.</div>';
+    }
+  }
+  el("refresh-runs-btn").addEventListener("click", refreshRuns);
+
+  // --- 초기 로드: 저장된 연결 정보 복원 ---
+  (async function init(){
+    var saved = await storeGet("gh_config");
+    if (saved){
+      try{
+        var cfg = JSON.parse(saved);
+        el("repo-input").value = (cfg.owner || "") + (cfg.repo ? "/" + cfg.repo : "");
+        el("pat-input").value = cfg.pat || "";
+      }catch(e){}
+    }
+  })();
+})();
+</script>
+</body>
+</html>
