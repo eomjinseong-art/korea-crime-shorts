@@ -121,10 +121,13 @@ def generate_character_image(internal_voice_id: str, character_name: str,
             OPENAI_IMAGE_EDIT_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             files={"image": ref_file},
-            data={"prompt": prompt, "size": IMAGE_SIZE, "n": 1},
+            data={"model": "gpt-image-1", "prompt": prompt, "size": IMAGE_SIZE, "n": 1},
             timeout=60,
         )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(
+            f"OpenAI 이미지 편집 요청 실패: HTTP {resp.status_code} - {resp.text[:500]}"
+        )
     data = resp.json()
     b64_image = data["data"][0]["b64_json"]
 
