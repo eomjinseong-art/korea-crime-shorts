@@ -2,11 +2,11 @@
 1일 1쇼츠 자동화 파이프라인 - 4단계: 대본 생성
 
 collect_news.py가 만든 output/facts_{date}.json (사실관계 5W1H)을 입력으로 받아,
-'편의점 알바생 + 단골 손님'의 대화 형식 영어 대본을 생성한다.
+'편의점 알바생 + 택시기사' 두 사람의 대화 형식 영어 대본을 생성한다.
 
-캐릭터 구조:
-  - 알바생 (고정 1명): 채널의 얼굴. 덤덤하게 팩폭하는 톤.
-  - 손님 (고정 로테이션 2~3명): 그날 사건과 어울리는 손님을 배정.
+캐릭터/톤/캐치프레이즈 등은 이 파일이 아니라 리포지토리 루트의 config.json에서
+관리한다. 대시보드에서 config.json을 직접 수정할 수 있어서, 캐릭터를 바꾸고
+싶으면 이 코드가 아니라 config.json만 고치면 된다.
 
 출력은 화자별 대사 리스트(JSON)이며, 5단계(음성 생성)에서 화자별로 다른 TTS
 보이스를 매핑하는 데 그대로 쓸 수 있다.
@@ -20,73 +20,42 @@ collect_news.py가 만든 output/facts_{date}.json (사실관계 5W1H)을 입력
 
 import os
 import json
-import random
 import datetime as dt
 
 from anthropic import Anthropic
 
-# ---------------------------------------------------------------------------
-# 캐릭터 설정 - 여기 값만 바꾸면 캐릭터 톤/로스터를 조정할 수 있다.
-# ---------------------------------------------------------------------------
-
-CLERK = {
-    "name": "알바생",
-    "voice_id": "clerk_voice",       # 5단계 TTS 매핑용 식별자
-    "persona": (
-        "24시간 편의점에서 일하는 20대 알바생. 놀라운 얘기를 들어도 크게 동요하지 "
-        "않고 덤덤하게 팩트로 받아치는 성격. 가끔 시니컬한 유머를 섞는다."
-    ),
-}
-
-CUSTOMER_ROSTER = [
-    {
-        "name": "택시기사",
-        "name_en": "a taxi driver",
-        "voice_id": "customer_taxi_voice",
-        "persona": "매일 밤 편의점에 들르는 단골 택시기사. 서울 곳곳 소문에 빠삭하다.",
-    },
-    {
-        "name": "취준생",
-        "name_en": "a job-seeker",
-        "voice_id": "customer_student_voice",
-        "persona": "편의점 근처 고시원에 사는 취업준비생. 뉴스에 예민하게 반응한다.",
-    },
-    {
-        "name": "야간근무자",
-        "name_en": "a night-shift worker",
-        "voice_id": "customer_worker_voice",
-        "persona": "야간 근무 마치고 들르는 직장인. 피곤하지만 할 말은 하는 스타일.",
-    },
-]
-
-CATCHPHRASE = "That's why you always lock up properly around here."
-
+CONFIG_PATH = "config.json"
 FACTS_PATH_TEMPLATE = "output/facts_{date}.json"
 SCRIPT_PATH_TEMPLATE = "output/script_{date}.json"
 
-TARGET_WORD_COUNT = "130-150"
+
+# ---------------------------------------------------------------------------
+# 설정 로드
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        raise SystemExit(f"{CONFIG_PATH} 가 없습니다. 리포지토리 루트에 config.json을 두세요.")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ---------------------------------------------------------------------------
 # 대본 생성
 # ---------------------------------------------------------------------------
 
-def pick_customer() -> dict:
-    """오늘 대화 상대로 쓸 손님을 로테이션에서 고른다.
+def build_system_prompt(config: dict) -> str:
+    clerk = config["clerk"]
+    customer = config["customer"]
+    catchphrase = config["catchphrase"]
+    target_word_count = config.get("target_word_count", "130-150")
 
-    지금은 랜덤 선택이지만, 사건 카테고리(예: 야간 사건이면 야간근무자)에
-    맞춰 규칙 기반으로 바꿔도 된다.
-    """
-    return random.choice(CUSTOMER_ROSTER)
-
-
-def build_system_prompt(customer: dict) -> str:
     return (
         "당신은 영어권 해외 시청자를 위한 유튜브 쇼츠 대본 작가입니다. "
         "한국 편의점을 배경으로, 알바생과 손님 두 사람의 짧은 대화 형식으로 "
         "오늘의 사건 사실관계를 자연스럽게 전달하는 60초 이내 영어 대본을 씁니다.\n\n"
         f"등장인물:\n"
-        f"1) {CLERK['name']} (speaker id: clerk) - {CLERK['persona']}\n"
+        f"1) {clerk['name']} (speaker id: clerk) - {clerk['persona']}\n"
         f"2) {customer['name']} (speaker id: customer) - {customer['persona']}\n\n"
         "작성 규칙:\n"
         "1. 입력으로 주어지는 사실관계 외의 사실을 지어내지 마세요.\n"
@@ -94,17 +63,16 @@ def build_system_prompt(customer: dict) -> str:
         "3. 실명이 있다면 익명 표현으로 바꾸세요 (예: '30대 남성').\n"
         "4. 대화는 계산대에서 스몰토크로 시작 -> 손님이 사건을 언급 -> "
         "알바생이 되묻거나 팩폭 리액션 -> 사실관계 자연스럽게 전달 -> "
-        f"알바생이 아래 캐치프레이즈로 마무리하는 흐름을 따르세요: \"{CATCHPHRASE}\"\n"
-        f"5. 전체 대사 총합은 영어 단어 기준 {TARGET_WORD_COUNT}단어 내외로 하세요.\n"
+        f"알바생이 아래 캐치프레이즈로 마무리하는 흐름을 따르세요: \"{catchphrase}\"\n"
+        f"5. 전체 대사 총합은 영어 단어 기준 {target_word_count}단어 내외로 하세요.\n"
         "6. 반드시 JSON만 출력하세요. 다른 설명이나 마크다운은 포함하지 마세요.\n"
         "7. 출력 스키마: {\"turns\": [{\"speaker\": \"clerk\"|\"customer\", "
         "\"line\": str}, ...]}"
     )
 
 
-def generate_dialogue(client: Anthropic, facts: dict, customer: dict) -> dict:
-    system_prompt = build_system_prompt(customer)
-
+def generate_dialogue(client: Anthropic, facts: dict, config: dict) -> dict:
+    system_prompt = build_system_prompt(config)
     user_content = json.dumps(facts, ensure_ascii=False)
 
     message = client.messages.create(
@@ -135,6 +103,7 @@ def main():
 
     client = Anthropic(api_key=api_key)
     today = dt.date.today().isoformat()
+    config = load_config()
 
     facts_path = FACTS_PATH_TEMPLATE.format(date=today)
     if not os.path.exists(facts_path):
@@ -144,16 +113,13 @@ def main():
         payload = json.load(f)
     facts = payload["selected_facts"]
 
-    print("[1/2] 오늘의 손님 캐릭터 선택 중...")
-    customer = pick_customer()
-    print(f"  선택된 손님: {customer['name']}")
+    print("[1/1] 대화 대본 생성 중...")
+    dialogue = generate_dialogue(client, facts, config)
 
-    print("[2/2] 대화 대본 생성 중...")
-    dialogue = generate_dialogue(client, facts, customer)
-
-    # 화자 id를 실제 캐릭터 정보(이름, 보이스 id)로 확장해서 5단계에서 바로 쓸 수 있게 한다
+    clerk = config["clerk"]
+    customer = config["customer"]
     speaker_map = {
-        "clerk": {"name": CLERK["name"], "voice_id": CLERK["voice_id"]},
+        "clerk": {"name": clerk["name"], "voice_id": clerk["voice_id"]},
         "customer": {"name": customer["name"], "voice_id": customer["voice_id"]},
     }
     for turn in dialogue["turns"]:
@@ -161,8 +127,7 @@ def main():
         turn["voice_id"] = speaker_map[turn["speaker"]]["voice_id"]
 
     # 손님의 첫 대사(보통 사건을 언급하는 훅 문장)를 제목으로 쓴다.
-    # 6단계(영상 조립)의 인트로 타이틀 카드와 7단계(업로드) 메타데이터가
-    # 이 값을 그대로 같이 쓴다 - 두 군데서 따로 만들면 서로 달라질 수 있어서.
+    # 인트로 타이틀 카드, 썸네일, 유튜브 업로드 제목이 전부 이 값을 그대로 같이 쓴다.
     hook_line = next((t["line"] for t in dialogue["turns"] if t["speaker"] == "customer"),
                       dialogue["turns"][0]["line"])
     title = hook_line.rstrip("?.! ")
