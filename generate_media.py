@@ -116,20 +116,30 @@ def generate_character_image(internal_voice_id: str, character_name: str,
 
     prompt = build_scene_prompt(character_name, line)
 
-    with open(ref_path, "rb") as ref_file:
-        resp = requests.post(
-            OPENAI_IMAGE_EDIT_URL,
-            headers={"Authorization": f"Bearer {api_key}"},
-            files={"image": ref_file},
-            data={"model": "gpt-image-1", "prompt": prompt, "size": IMAGE_SIZE, "n": 1},
-            timeout=60,
-        )
-    if not resp.ok:
-        raise RuntimeError(
-            f"OpenAI 이미지 편집 요청 실패: HTTP {resp.status_code} - {resp.text[:500]}"
-        )
-    data = resp.json()
-    b64_image = data["data"][0]["b64_json"]
+    last_error = None
+    for attempt in range(1, 3):  # 최대 2회 시도 (첫 시도 + 재시도 1회)
+        try:
+            with open(ref_path, "rb") as ref_file:
+                resp = requests.post(
+                    OPENAI_IMAGE_EDIT_URL,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={"image": ref_file},
+                    data={"model": "gpt-image-1", "prompt": prompt, "size": IMAGE_SIZE, "n": 1},
+                    timeout=180,
+                )
+            if not resp.ok:
+                raise RuntimeError(
+                    f"OpenAI 이미지 편집 요청 실패: HTTP {resp.status_code} - {resp.text[:500]}"
+                )
+            data = resp.json()
+            b64_image = data["data"][0]["b64_json"]
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = e
+            print(f"  [경고] 이미지 요청 시도 {attempt}회차 실패({type(e).__name__}), 재시도합니다...")
+    else:
+        raise RuntimeError(f"이미지 생성이 재시도 후에도 실패했습니다: {last_error}")
+
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "wb") as f:
