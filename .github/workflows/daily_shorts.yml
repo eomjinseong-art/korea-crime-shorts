@@ -1,0 +1,78 @@
+name: daily-shorts-pipeline
+
+on:
+  schedule:
+    # UTC 12:00 = 한국시간(KST) 오후 9시
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}   # 수동 실행 버튼 (테스트/디버깅용)
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: ffmpeg 설치
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: 파이썬 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 시크릿 -> 파일 복원 (YouTube 인증)
+        env:
+          YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+        run: |
+          echo "$YOUTUBE_CLIENT_SECRET_JSON" > client_secret.json
+          echo "$YOUTUBE_TOKEN_JSON" > token.json
+
+      - name: "1-2단계: 소스 수집 & 사실관계 추출"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python collect_news.py
+
+      - name: "3단계: 대화 대본 생성"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python generate_script.py
+
+      - name: "4단계: 음성/이미지 생성"
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python generate_media.py
+
+      - name: "5단계: 영상 조립 (ffmpeg)"
+        run: python assemble_video.py
+
+      - name: "6단계: YouTube 업로드"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python upload_video.py
+
+      - name: 산출물 아티팩트 업로드 (백업)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-output-${{ github.run_id }}
+          path: output/
+          retention-days: 7
+
+      - name: 워크플로우 실패 알림 (Slack)
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\":rotating_light: daily-shorts-pipeline 워크플로우 자체가 실패했습니다. 로그를 확인하세요: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$SLACK_WEBHOOK_URL"
+          fi
