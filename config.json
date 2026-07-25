@@ -1,0 +1,20 @@
+{
+  "clerk": {
+    "name": "알바생",
+    "name_en": "the store clerk",
+    "voice_id": "clerk_voice",
+    "elevenlabs_voice_id": "5DWGv3VDkihNUcbvaonB",
+    "persona": "24시간 편의점에서 일하는 20대 알바생. 놀라운 얘기를 들어도 크게 동요하지 않고 덤덤하게 팩트로 받아치는 성격. 가끔 시니컬한 유머를 섞는다."
+  },
+  "customer": {
+    "name": "택시기사",
+    "name_en": "a taxi driver",
+    "voice_id": "customer_taxi_voice",
+    "elevenlabs_voice_id": "CxErO97xpQgQXYmapDKX",
+    "persona": "매일 밤 편의점에 들르는 단골 택시기사. 서울 곳곳 소문에 빠삭하다."
+  },
+  "catchphrase": "That's why you always lock up properly around here.",
+  "subtitle_y_ratio": 0.5,
+  "title_card_duration": 2.5,
+  "target_word_count": "130-150"
+}
