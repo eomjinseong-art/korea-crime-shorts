@@ -24,9 +24,11 @@ assemble_video.py가 만든 output/final_{date}.mp4 를 YouTube Shorts로 업로
 
 import os
 import json
+import textwrap
 import datetime as dt
 
 import requests
+from PIL import Image, ImageDraw, ImageFont
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -40,8 +42,15 @@ TOKEN_PATH = "token.json"
 
 FINAL_VIDEO_PATH_TEMPLATE = "output/final_{date}.mp4"
 SCRIPT_PATH_TEMPLATE = "output/script_{date}.json"
+THUMBNAIL_PATH_TEMPLATE = "output/thumbnail_{date}.png"
 
 CHANNEL_HASHTAGS = "#Korea #KoreaNews #ShortsNews"
+
+THUMBNAIL_SIZE = (1280, 720)  # 유튜브 권장 썸네일 해상도
+FONT_PATH_CANDIDATES = [
+    "assets/fonts/subtitle.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +111,61 @@ def build_metadata(script: dict) -> dict:
     tags = ["Korea", "Korea news", "shorts", "true story", "convenience store"]
 
     return {"title": title, "description": description, "tags": tags}
+
+
+# ---------------------------------------------------------------------------
+# 썸네일 생성 (제목 텍스트를 이미지로 렌더링)
+# ---------------------------------------------------------------------------
+
+def load_font(size: int) -> ImageFont.FreeTypeFont:
+    for path in FONT_PATH_CANDIDATES:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def build_thumbnail(title: str, out_path: str) -> None:
+    """썸네일에 뜰 제목 이미지를 만든다. 인트로 타이틀 카드와 같은 문구를 쓴다."""
+    img = Image.new("RGB", THUMBNAIL_SIZE, color=(10, 10, 10))
+    draw = ImageDraw.Draw(img)
+
+    font = load_font(size=72)
+    wrapped_lines = textwrap.wrap(title, width=22)
+
+    line_heights = []
+    for line in wrapped_lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_heights.append(bbox[3] - bbox[1])
+    line_spacing = 16
+    total_height = sum(line_heights) + line_spacing * (len(wrapped_lines) - 1)
+
+    y = (THUMBNAIL_SIZE[1] - total_height) // 2
+    for line, h in zip(wrapped_lines, line_heights):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        x = (THUMBNAIL_SIZE[0] - w) // 2
+        draw.text((x, y), line, font=font, fill=(255, 255, 255))
+        y += h + line_spacing
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    img.save(out_path)
+
+
+def set_thumbnail(creds: Credentials, video_id: str, thumbnail_path: str) -> None:
+    """업로드된 영상에 커스텀 썸네일을 지정한다.
+    주의: 커스텀 썸네일 설정은 채널이 전화번호 인증(phone verification)을
+    완료한 경우에만 가능하다. 안 되어 있으면 조용히 건너뛴다."""
+    youtube = build("youtube", "v3", credentials=creds)
+    try:
+        youtube.thumbnails().set(
+            videoId=video_id,
+            media_body=MediaFileUpload(thumbnail_path, mimetype="image/png"),
+        ).execute()
+    except Exception as e:
+        print(f"  [경고] 썸네일 설정 실패 (채널 전화번호 인증이 안 되어 있을 수 있습니다): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -170,15 +234,20 @@ def main():
         with open(script_path, "r", encoding="utf-8") as f:
             script = json.load(f)
 
-        print("[1/3] YouTube 인증 중...")
+        print("[1/4] YouTube 인증 중...")
         creds = get_credentials()
 
-        print("[2/3] 메타데이터(제목/설명/태그) 생성 중...")
+        print("[2/4] 메타데이터(제목/설명/태그) 생성 중...")
         metadata = build_metadata(script)
         print(f"  제목: {metadata['title']}")
 
-        print("[3/3] 업로드 중...")
+        print("[3/4] 업로드 중...")
         video_id = upload_video(creds, video_path, metadata)
+
+        print("[4/4] 썸네일 생성 및 설정 중...")
+        thumbnail_path = THUMBNAIL_PATH_TEMPLATE.format(date=today)
+        build_thumbnail(script.get("title", metadata["title"]), thumbnail_path)
+        set_thumbnail(creds, video_id, thumbnail_path)
 
         print(f"완료: https://youtube.com/shorts/{video_id}")
 
