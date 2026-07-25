@@ -160,8 +160,19 @@ def main():
         turn["character_name"] = speaker_map[turn["speaker"]]["name"]
         turn["voice_id"] = speaker_map[turn["speaker"]]["voice_id"]
 
+    # 손님의 첫 대사(보통 사건을 언급하는 훅 문장)를 제목으로 쓴다.
+    # 6단계(영상 조립)의 인트로 타이틀 카드와 7단계(업로드) 메타데이터가
+    # 이 값을 그대로 같이 쓴다 - 두 군데서 따로 만들면 서로 달라질 수 있어서.
+    hook_line = next((t["line"] for t in dialogue["turns"] if t["speaker"] == "customer"),
+                      dialogue["turns"][0]["line"])
+    title = hook_line.rstrip("?.! ")
+    if len(title) > 90:
+        title = title[:87] + "..."
+    title = f"{title}?"
+
     output = {
         "date": today,
+        "title": title,
         "customer_character": customer["name"],
         "customer_character_en": customer["name_en"],
         "source_link": facts.get("source_link"),
