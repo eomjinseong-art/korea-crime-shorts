@@ -35,11 +35,12 @@
   }
   .row{display:flex; gap:10px; margin-bottom:10px;}
   .row input{flex:1;}
-  input[type=text], input[type=password]{
+  input[type=text], input[type=password], textarea{
     width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
     padding:9px 11px; border-radius:6px; font-size:13px; font-family:var(--mono);
+    resize:vertical;
   }
-  input::placeholder{color:var(--text-dim);}
+  input::placeholder, textarea::placeholder{color:var(--text-dim);}
   label{display:block; font-size:12px; color:var(--text-dim); margin-bottom:5px;}
   .field{margin-bottom:12px;}
   button{
@@ -131,11 +132,39 @@
     <button class="btn-ghost" id="recheck-btn" style="margin-top:14px;">다시 확인</button>
   </div>
 
-  <!-- 시크릿 입력 -->
-  <div class="panel" id="secrets-panel" style="display:none;">
-    <h2>시크릿 입력 / 갱신</h2>
-    <div id="secret-fields"></div>
-    <div id="secrets-msg"></div>
+  <!-- 설정 (config.json) -->
+  <div class="panel" id="config-panel" style="display:none;">
+    <h2>설정 (config.json)</h2>
+    <p class="hint" style="margin-top:0;">캐릭터, 자막 위치, 타이틀 카드 길이 등을 여기서 바로 고치고 저장하면 다음 실행부터 바로 반영돼요.</p>
+
+    <div class="field"><label>알바생 이름</label><input type="text" id="cfg-clerk-name"></div>
+    <div class="field"><label>알바생 영문 표현 (메타데이터용)</label><input type="text" id="cfg-clerk-name-en"></div>
+    <div class="field"><label>알바생 페르소나</label><textarea id="cfg-clerk-persona" rows="2"></textarea></div>
+    <div class="field"><label>알바생 ElevenLabs Voice ID</label><input type="text" id="cfg-clerk-voice"></div>
+
+    <div class="field"><label>택시기사 이름</label><input type="text" id="cfg-customer-name"></div>
+    <div class="field"><label>택시기사 영문 표현 (메타데이터용)</label><input type="text" id="cfg-customer-name-en"></div>
+    <div class="field"><label>택시기사 페르소나</label><textarea id="cfg-customer-persona" rows="2"></textarea></div>
+    <div class="field"><label>택시기사 ElevenLabs Voice ID</label><input type="text" id="cfg-customer-voice"></div>
+
+    <div class="field"><label>마무리 캐치프레이즈</label><input type="text" id="cfg-catchphrase"></div>
+    <div class="row">
+      <div class="field" style="flex:1;">
+        <label>자막 세로 위치 (0=맨위, 0.5=정중앙, 1=맨아래)</label>
+        <input type="text" id="cfg-subtitle-y">
+      </div>
+      <div class="field" style="flex:1;">
+        <label>타이틀 카드 길이 (초)</label>
+        <input type="text" id="cfg-title-duration">
+      </div>
+    </div>
+    <div class="field"><label>목표 대사 분량 (영어 단어 수, 예: 130-150)</label><input type="text" id="cfg-word-count"></div>
+
+    <div class="row">
+      <button class="btn-ghost" id="config-load-btn">불러오기</button>
+      <button class="btn-primary" id="config-save-btn">저장</button>
+    </div>
+    <div id="config-msg"></div>
   </div>
 
   <!-- 실행 -->
@@ -158,7 +187,6 @@
 
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/libsodium-wrappers/0.7.15/sodium.js"></script>
 <script>
 (function(){
   "use strict";
@@ -169,14 +197,11 @@
     {name:"OPENAI_API_KEY", label:"OpenAI API 키 (이미지 생성)"},
     {name:"YOUTUBE_CLIENT_SECRET_JSON", label:"YouTube client_secret.json 내용"},
     {name:"YOUTUBE_TOKEN_JSON", label:"YouTube token.json 내용"},
-    {name:"SLACK_WEBHOOK_URL", label:"Slack 웹훅 URL", optional:true},
   ];
 
   var REQUIRED_ASSETS = [
     {path:"assets/character_refs/clerk_voice.png", label:"알바생 레퍼런스 이미지"},
     {path:"assets/character_refs/customer_taxi_voice.png", label:"손님(택시기사) 레퍼런스 이미지"},
-    {path:"assets/character_refs/customer_student_voice.png", label:"손님(취준생) 레퍼런스 이미지"},
-    {path:"assets/character_refs/customer_worker_voice.png", label:"손님(야간근무자) 레퍼런스 이미지"},
     {path:"assets/bgm.mp3", label:"배경음악", optional:true},
   ];
 
@@ -244,12 +269,12 @@
       await storeSet("gh_config", JSON.stringify({owner: state.owner, repo: state.repo, pat: state.pat}));
 
       el("checklist-panel").style.display = "block";
-      el("secrets-panel").style.display = "block";
+      el("config-panel").style.display = "block";
       el("run-panel").style.display = "block";
       el("history-panel").style.display = "block";
 
-      buildSecretFields();
       await runChecklist();
+      await loadConfig();
       await refreshRuns();
     }catch(e){
       state.connected = false;
@@ -263,6 +288,7 @@
     var box = el("checklist");
     box.innerHTML = '<div class="empty">확인 중...</div>';
     var items = [];
+    var warnings = [];
 
     var existingSecretNames = new Set();
     try{
@@ -270,8 +296,13 @@
       if (secRes.ok){
         var secData = await secRes.json();
         (secData.secrets || []).forEach(function(s){ existingSecretNames.add(s.name); });
+      } else {
+        var secErrText = await secRes.text().catch(function(){ return ""; });
+        warnings.push("시크릿 목록 조회 실패: HTTP " + secRes.status + " - " + secErrText.slice(0,150));
       }
-    }catch(e){}
+    }catch(e){
+      warnings.push("시크릿 목록 조회 중 네트워크 오류: " + e.message);
+    }
 
     REQUIRED_SECRETS.forEach(function(s){
       items.push({
@@ -287,11 +318,26 @@
       try{
         var r = await gh("/repos/" + state.owner + "/" + state.repo + "/contents/" + a.path);
         ok = r.ok;
-      }catch(e){}
+        if (!r.ok && r.status !== 404){
+          var assetErrText = await r.text().catch(function(){ return ""; });
+          warnings.push(a.path + " 조회 실패: HTTP " + r.status + " - " + assetErrText.slice(0,120));
+        }
+      }catch(e){
+        warnings.push(a.path + " 조회 중 네트워크 오류: " + e.message);
+      }
       items.push({label: "파일: " + a.label, ok: ok, optional: !!a.optional});
     }
 
     box.innerHTML = "";
+
+    if (warnings.length > 0){
+      var warnBox = document.createElement("div");
+      warnBox.className = "msg error";
+      warnBox.style.marginBottom = "12px";
+      warnBox.textContent = warnings.join(" / ");
+      box.appendChild(warnBox);
+    }
+
     items.forEach(function(it){
       var row = document.createElement("div");
       row.className = "check-item";
@@ -314,68 +360,112 @@
   }
   el("recheck-btn").addEventListener("click", runChecklist);
 
-  // --- 시크릿 입력 필드 구성 ---
-  function buildSecretFields(){
-    var container = el("secret-fields");
-    container.innerHTML = "";
-    REQUIRED_SECRETS.forEach(function(s){
-      var row = document.createElement("div");
-      row.className = "secret-row";
+  // --- config.json 불러오기 ---
+  // GitHub Contents API는 파일 내용을 base64로 준다. sha도 같이 받아둬야
+  // 나중에 저장(PUT)할 때 "다른 사람이 그 사이에 바꾸지 않았는지" 확인에 쓸 수 있다.
+  var configState = { sha: null };
 
-      var input = document.createElement("input");
-      input.type = "password";
-      input.placeholder = s.label + (s.optional ? " (선택)" : "");
-      input.id = "secret-" + s.name;
-
-      var btn = document.createElement("button");
-      btn.className = "btn-ghost";
-      btn.textContent = "저장";
-      btn.addEventListener("click", async function(){
-        var val = input.value.trim();
-        if (!val){ return; }
-        btn.disabled = true; btn.textContent = "저장 중...";
-        var ok = await setSecret(s.name, val);
-        btn.disabled = false; btn.textContent = "저장";
-        var msgBox = el("secrets-msg");
-        if (ok){
-          showMsg(msgBox, s.name + " 저장 완료.", "success");
-          input.value = "";
-          runChecklist();
-        } else {
-          showMsg(msgBox, s.name + " 저장 실패. 토큰에 secrets 쓰기 권한이 있는지 확인하세요.", "error");
-        }
-      });
-
-      row.appendChild(input);
-      row.appendChild(btn);
-      container.appendChild(row);
-    });
+  function b64DecodeUtf8(b64){
+    var binary = atob(b64.replace(/\n/g, ""));
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++){ bytes[i] = binary.charCodeAt(i); }
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+  function b64EncodeUtf8(str){
+    var bytes = new TextEncoder().encode(str);
+    var binary = "";
+    for (var i = 0; i < bytes.length; i++){ binary += String.fromCharCode(bytes[i]); }
+    return btoa(binary);
   }
 
-  // --- 시크릿 암호화 후 저장 (GitHub 공개키로 libsodium seal box) ---
-  async function setSecret(name, value){
+  async function loadConfig(){
+    var msgBox = el("config-msg");
     try{
-      var keyRes = await gh("/repos/" + state.owner + "/" + state.repo + "/actions/secrets/public-key");
-      if (!keyRes.ok) return false;
-      var keyData = await keyRes.json();
+      var res = await gh("/repos/" + state.owner + "/" + state.repo + "/contents/config.json");
+      if (!res.ok){
+        var errText = await res.text().catch(function(){ return ""; });
+        showMsg(msgBox, "config.json 불러오기 실패: HTTP " + res.status + " - " + errText.slice(0,200), "error");
+        return;
+      }
+      var data = await res.json();
+      configState.sha = data.sha;
+      var cfg = JSON.parse(b64DecodeUtf8(data.content));
 
-      await sodium.ready;
-      var binkey = sodium.from_base64(keyData.key, sodium.base64_variants.ORIGINAL);
-      var binsec = sodium.from_string(value);
-      var encBytes = sodium.crypto_box_seal(binsec, binkey);
-      var encryptedValue = sodium.to_base64(encBytes, sodium.base64_variants.ORIGINAL);
+      el("cfg-clerk-name").value = cfg.clerk.name || "";
+      el("cfg-clerk-name-en").value = cfg.clerk.name_en || "";
+      el("cfg-clerk-persona").value = cfg.clerk.persona || "";
+      el("cfg-clerk-voice").value = cfg.clerk.elevenlabs_voice_id || "";
 
-      var putRes = await gh("/repos/" + state.owner + "/" + state.repo + "/actions/secrets/" + name, {
-        method: "PUT",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({encrypted_value: encryptedValue, key_id: keyData.key_id}),
-      });
-      return putRes.ok;
+      el("cfg-customer-name").value = cfg.customer.name || "";
+      el("cfg-customer-name-en").value = cfg.customer.name_en || "";
+      el("cfg-customer-persona").value = cfg.customer.persona || "";
+      el("cfg-customer-voice").value = cfg.customer.elevenlabs_voice_id || "";
+
+      el("cfg-catchphrase").value = cfg.catchphrase || "";
+      el("cfg-subtitle-y").value = cfg.subtitle_y_ratio != null ? cfg.subtitle_y_ratio : 0.5;
+      el("cfg-title-duration").value = cfg.title_card_duration != null ? cfg.title_card_duration : 2.5;
+      el("cfg-word-count").value = cfg.target_word_count || "130-150";
     }catch(e){
-      console.error(e);
-      return false;
+      showMsg(msgBox, "config.json 불러오기 중 오류: " + e.message, "error");
     }
   }
+  el("config-load-btn").addEventListener("click", loadConfig);
+
+  // --- config.json 저장 ---
+  el("config-save-btn").addEventListener("click", async function(){
+    var msgBox = el("config-msg");
+    var btn = el("config-save-btn");
+
+    var cfg = {
+      clerk: {
+        name: el("cfg-clerk-name").value.trim(),
+        name_en: el("cfg-clerk-name-en").value.trim(),
+        voice_id: "clerk_voice",
+        elevenlabs_voice_id: el("cfg-clerk-voice").value.trim(),
+        persona: el("cfg-clerk-persona").value.trim(),
+      },
+      customer: {
+        name: el("cfg-customer-name").value.trim(),
+        name_en: el("cfg-customer-name-en").value.trim(),
+        voice_id: "customer_taxi_voice",
+        elevenlabs_voice_id: el("cfg-customer-voice").value.trim(),
+        persona: el("cfg-customer-persona").value.trim(),
+      },
+      catchphrase: el("cfg-catchphrase").value.trim(),
+      subtitle_y_ratio: parseFloat(el("cfg-subtitle-y").value) || 0.5,
+      title_card_duration: parseFloat(el("cfg-title-duration").value) || 2.5,
+      target_word_count: el("cfg-word-count").value.trim() || "130-150",
+    };
+
+    if (!configState.sha){
+      showMsg(msgBox, "먼저 '불러오기'를 눌러서 현재 config.json을 가져온 뒤 수정해주세요.", "error");
+      return;
+    }
+
+    btn.disabled = true; btn.textContent = "저장 중...";
+    try{
+      var res = await gh("/repos/" + state.owner + "/" + state.repo + "/contents/config.json", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          message: "config.json 업데이트 (대시보드에서)",
+          content: b64EncodeUtf8(JSON.stringify(cfg, null, 2)),
+          sha: configState.sha,
+        }),
+      });
+      if (res.ok){
+        var data = await res.json();
+        configState.sha = data.content.sha;  // 다음 저장을 위해 최신 sha로 갱신
+        showMsg(msgBox, "저장 완료. 다음 실행부터 반영돼요.", "success");
+      } else {
+        var errText = await res.text().catch(function(){ return ""; });
+        showMsg(msgBox, "저장 실패: HTTP " + res.status + " - " + errText.slice(0,200), "error");
+      }
+    }catch(e){
+      showMsg(msgBox, "저장 중 오류: " + e.message, "error");
+    }
+    btn.disabled = false; btn.textContent = "저장";
+  });
 
   // --- 실행 트리거 ---
   el("run-btn").addEventListener("click", async function(){
