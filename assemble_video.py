@@ -25,6 +25,7 @@ MANIFEST_PATH_TEMPLATE = "output/manifest_{date}.json"
 SCRIPT_PATH_TEMPLATE = "output/script_{date}.json"
 SEGMENTS_DIR_TEMPLATE = "output/segments_{date}"
 FINAL_PATH_TEMPLATE = "output/final_{date}.mp4"
+CONFIG_PATH = "config.json"
 
 BGM_PATH = "assets/bgm.mp3"
 FONT_PATH = "assets/fonts/subtitle.ttf"
@@ -33,13 +34,14 @@ VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
 BGM_VOLUME = 0.15  # 대사 대비 배경음악 볼륨 비율
 
-# 자막 세로 위치: 화면 높이 대비 비율. 0.5 = 정중앙, 값이 클수록 아래로 내려감.
-# 지금은 "화면 중간에서 약간 하단"에 맞춰 0.58로 설정. 필요하면 이 숫자만 바꾸면 됨.
-SUBTITLE_Y_RATIO = 0.58
-
-# 영상 시작 전에 보여줄 타이틀 카드 길이(초)
-TITLE_CARD_DURATION = 2.5
 TITLE_CARD_BG_COLOR = "black"
+
+
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        raise SystemExit(f"{CONFIG_PATH} 가 없습니다. 리포지토리 루트에 config.json을 두세요.")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +72,7 @@ def get_audio_duration(audio_path: str) -> float:
 # ---------------------------------------------------------------------------
 
 def build_segment(image_path: str, audio_path: str, line: str,
-                   character_name: str, out_path: str) -> None:
+                   character_name: str, out_path: str, subtitle_y_ratio: float) -> None:
     duration = get_audio_duration(audio_path)
 
     # drawtext에 특수문자(콜론, 따옴표 등) 이스케이프 문제를 피하려고
@@ -86,7 +88,7 @@ def build_segment(image_path: str, audio_path: str, line: str,
     drawtext = (
         f"drawtext=textfile='{subtitle_file}'{fontfile_opt}:"
         "fontsize=44:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=18:"
-        f"x=(w-text_w)/2:y=h*{SUBTITLE_Y_RATIO}-text_h/2:line_spacing=8"
+        f"x=(w-text_w)/2:y=h*{subtitle_y_ratio}-text_h/2:line_spacing=8"
     )
 
     vf = (
@@ -114,7 +116,7 @@ def build_segment(image_path: str, audio_path: str, line: str,
 # 인트로 타이틀 카드
 # ---------------------------------------------------------------------------
 
-def build_title_card(title: str, out_path: str) -> None:
+def build_title_card(title: str, out_path: str, duration: float) -> None:
     """영상 시작 전에 짧게 보여줄 타이틀 카드(검은 배경 + 제목 텍스트)를 만든다."""
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -134,11 +136,11 @@ def build_title_card(title: str, out_path: str) -> None:
     run([
         "ffmpeg", "-y",
         "-f", "lavfi",
-        "-i", f"color=c={TITLE_CARD_BG_COLOR}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:d={TITLE_CARD_DURATION}",
+        "-i", f"color=c={TITLE_CARD_BG_COLOR}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:d={duration}",
         "-f", "lavfi",
         "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100",
         "-vf", drawtext,
-        "-t", str(TITLE_CARD_DURATION),
+        "-t", str(duration),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-shortest",
@@ -215,13 +217,17 @@ def main():
         with open(script_path, "r", encoding="utf-8") as f:
             title = json.load(f).get("title")
 
+    config = load_config()
+    subtitle_y_ratio = config.get("subtitle_y_ratio", 0.5)
+    title_card_duration = config.get("title_card_duration", 2.5)
+
     segments_dir = SEGMENTS_DIR_TEMPLATE.format(date=today)
     segment_paths = []
 
     if title:
         print("인트로 타이틀 카드 렌더링 중...")
         title_card_path = os.path.join(segments_dir, "00_title.mp4")
-        build_title_card(title, title_card_path)
+        build_title_card(title, title_card_path, title_card_duration)
         segment_paths.append(title_card_path)
 
     for turn in manifest["turns"]:
@@ -234,6 +240,7 @@ def main():
             line=turn["line"],
             character_name=turn["character_name"],
             out_path=seg_path,
+            subtitle_y_ratio=subtitle_y_ratio,
         )
         segment_paths.append(seg_path)
 
