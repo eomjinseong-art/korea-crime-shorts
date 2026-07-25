@@ -46,10 +46,10 @@ CHARACTER_REF_DIR = "assets/character_refs"
 
 # 내부 voice_id -> 실제 ElevenLabs voice_id. 콘솔에서 캐릭터 목소리를 만든 뒤 채워 넣으세요.
 ELEVENLABS_VOICE_MAP = {
-    "clerk_voice": "REPLACE_WITH_ELEVENLABS_VOICE_ID_CLERK",
-    "customer_taxi_voice": "REPLACE_WITH_ELEVENLABS_VOICE_ID_TAXI",
-    "customer_student_voice": "REPLACE_WITH_ELEVENLABS_VOICE_ID_STUDENT",
-    "customer_worker_voice": "REPLACE_WITH_ELEVENLABS_VOICE_ID_WORKER",
+    "clerk_voice": "5DWGv3VDkihNUcbvaonB",
+    "customer_taxi_voice": "CxErO97xpQgQXYmapDKX",
+    "customer_student_voice": "70DeQK5Ztp7WmEGGysLT",
+    "customer_worker_voice": "mK6Q1HRYYwUJwQGwMPYw",
 }
 
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
