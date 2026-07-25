@@ -83,12 +83,13 @@ def build_metadata(script: dict) -> dict:
     lines = [t["line"] for t in script["turns"]]
     customer_char = script.get("customer_character_en", "a regular")
 
-    # 손님의 첫 대사(보통 사건을 언급하는 훅 문장)를 제목 재료로 사용
-    hook_line = next((t["line"] for t in script["turns"] if t["speaker"] == "customer"), lines[0])
-    title = hook_line.rstrip("?.! ")
-    if len(title) > 90:
-        title = title[:87] + "..."
-    title = f"{title}? {CHANNEL_HASHTAGS.split()[0]}"
+    # 제목은 generate_script.py가 이미 만들어서 script.json에 저장해뒀다 -
+    # 6단계 인트로 타이틀 카드와 여기 업로드 제목이 서로 달라지지 않도록 그 값을 그대로 쓴다.
+    base_title = script.get("title")
+    if not base_title:
+        hook_line = next((t["line"] for t in script["turns"] if t["speaker"] == "customer"), lines[0])
+        base_title = hook_line.rstrip("?.! ") + "?"
+    title = f"{base_title} {CHANNEL_HASHTAGS.split()[0]}"
 
     transcript = "\n".join(f"- {l}" for l in lines)
     description = (
