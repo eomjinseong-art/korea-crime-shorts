@@ -7,9 +7,10 @@ on:
   workflow_dispatch: {}   # 수동 실행 버튼 (테스트/디버깅용)
 
 jobs:
-  build-and-upload:
+  # --- 1~5단계: 뉴스 수집부터 영상 조립까지. 여기까진 완전 자동. ---
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
 
     steps:
       - name: 저장소 체크아웃
@@ -25,14 +26,6 @@ jobs:
 
       - name: 파이썬 의존성 설치
         run: pip install -r requirements.txt
-
-      - name: 시크릿 -> 파일 복원 (YouTube 인증)
-        env:
-          YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
-          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
-        run: |
-          echo "$YOUTUBE_CLIENT_SECRET_JSON" > client_secret.json
-          echo "$YOUTUBE_TOKEN_JSON" > token.json
 
       - name: "1-2단계: 소스 수집 & 사실관계 추출"
         env:
@@ -53,12 +46,10 @@ jobs:
       - name: "5단계: 영상 조립 (ffmpeg)"
         run: python assemble_video.py
 
-      - name: "6단계: YouTube 업로드"
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python upload_video.py
-
-      - name: 산출물 아티팩트 업로드 (백업)
+      # 다음 job(upload)이 이 결과물을 이어받아 쓸 수 있도록 아티팩트로 전달.
+      # 승인 대기 중에도 여기서 최종 영상(final_*.mp4)과 대본(script_*.json)을
+      # 다운로드해서 미리 확인할 수 있다.
+      - name: 산출물 전달 (다음 단계 + 미리보기용)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -66,13 +57,64 @@ jobs:
           path: output/
           retention-days: 7
 
-      - name: 워크플로우 실패 알림 (Slack)
+      - name: 빌드 실패 알림 (Slack)
         if: failure()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
             curl -s -X POST -H 'Content-type: application/json' \
-              --data "{\"text\":\":rotating_light: daily-shorts-pipeline 워크플로우 자체가 실패했습니다. 로그를 확인하세요: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              --data "{\"text\":\":rotating_light: 영상 제작(build) 단계 실패. 로그: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$SLACK_WEBHOOK_URL"
+          fi
+
+  # --- 6단계: YouTube 업로드. 사람이 GitHub에서 승인해야 이 job이 시작된다. ---
+  upload:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # 이 environment에 "Required reviewers"를 설정해두면, 여기서 워크플로우가
+    # 멈추고 승인을 기다린다. 레포지토리 Settings > Environments 에서 설정.
+    environment: youtube-upload
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 파이썬 의존성 설치 (업로드에 필요한 것만)
+        run: pip install google-auth-oauthlib google-api-python-client requests
+
+      - name: build job 산출물 받기
+        uses: actions/download-artifact@v4
+        with:
+          name: shorts-output-${{ github.run_id }}
+          path: output/
+
+      - name: 시크릿 -> 파일 복원 (YouTube 인증)
+        env:
+          YOUTUBE_CLIENT_SECRET_JSON: ${{ secrets.YOUTUBE_CLIENT_SECRET_JSON }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+        run: |
+          echo "$YOUTUBE_CLIENT_SECRET_JSON" > client_secret.json
+          echo "$YOUTUBE_TOKEN_JSON" > token.json
+
+      - name: "6단계: YouTube 업로드"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python upload_video.py
+
+      - name: 업로드 실패 알림 (Slack)
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\":rotating_light: YouTube 업로드(upload) 단계 실패. 로그: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
               "$SLACK_WEBHOOK_URL"
           fi
