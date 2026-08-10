@@ -1,22 +1,23 @@
 """
-1일 1쇼츠 자동화 파이프라인 - 6단계: 영상 조립
+1일 1쇼츠 자동화 파이프라인 - 6단계: 영상 조립 (단일 낭독 방식)
 
-generate_media.py가 만든 output/manifest_{date}.json (turn별 오디오/이미지 경로)을
-받아서, 각 turn을 이미지+음성이 있는 세그먼트로 만들고 이어 붙인 뒤
-배경음악(BGM)을 낮은 볼륨으로 섞어 최종 세로형(9:16) mp4를 만든다.
+generate_media.py가 만든 output/manifest_{date}.json을 받아서:
+  1) turn별 이미지를 그 turn에 배분된 duration만큼 보여주는 무음 영상
+     세그먼트로 만들고
+  2) 전부 이어붙인 뒤(여전히 무음)
+  3) 인트로 타이틀 카드(무음) 앞에 붙이고
+  4) 마지막에 낭독 음성(narration_audio) 하나를 통째로 입힌다
+     (타이틀 카드 길이만큼 딜레이를 줘서 타이밍을 맞춤) + BGM(있으면)
 
-[수정] 이미지 자체(generate_media.py가 PIL로 그린 카톡 화면)에 이미 대사
-텍스트가 들어있으므로, 여기서 별도 자막(drawtext)을 중복으로 그리지 않는다.
-예전 버전은 화면 중앙에 "화자명: 대사"를 drawtext로 한 번 더 그렸는데,
-그 폰트가 한글을 지원하지 않아 깨져 보였고 이미지 위에 겹쳐 보이는
-문제가 있었다. 인트로 타이틀 카드는 여전히 drawtext를 쓰므로
-assets/fonts/subtitle.ttf 에 실제 한글 폰트 파일이 있어야 한다.
+기존 버전과의 차이: 예전엔 turn마다 오디오+이미지를 같이 붙인 세그먼트를
+만들었지만, 이번엔 음성이 turn별로 쪼개져 있지 않고 하나뿐이라 영상을
+전부 무음으로 조립한 다음 마지막에 음성 트랙 하나를 입히는 방식으로 바뀌었다.
 
 필요 프로그램: ffmpeg, ffprobe (PATH에 있어야 함)
 
 사전 준비물:
-  assets/bgm.mp3            - 배경음악 (없으면 BGM 없이 렌더링)
-  assets/fonts/subtitle.ttf - 한글 지원 폰트 (인트로 타이틀 카드용, 필수)
+  assets/bgm.mp3      - 배경음악 (없으면 BGM 없이 렌더링)
+  assets/subtitle.ttf - 한글 지원 폰트 (인트로 타이틀 카드용, 필수)
 
 출력:
   output/final_{date}.mp4
@@ -39,7 +40,7 @@ FONT_PATH = "assets/subtitle.ttf"
 
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
-BGM_VOLUME = 0.15  # 대사 대비 배경음악 볼륨 비율
+BGM_VOLUME = 0.15
 
 TITLE_CARD_BG_COLOR = "black"
 
@@ -51,10 +52,6 @@ def load_config() -> dict:
         return json.load(f)
 
 
-# ---------------------------------------------------------------------------
-# 유틸
-# ---------------------------------------------------------------------------
-
 def run(cmd: list[str]) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -63,10 +60,10 @@ def run(cmd: list[str]) -> None:
         )
 
 
-def get_audio_duration(audio_path: str) -> float:
+def get_duration(path: str) -> float:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "csv=p=0", audio_path],
+         "-of", "csv=p=0", path],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -75,37 +72,28 @@ def get_audio_duration(audio_path: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 세그먼트(turn 하나) 렌더링 - 이미지에 이미 텍스트가 있으므로 자막 없이 합성만
+# 세그먼트(turn 하나) 렌더링 - 이미지 + 무음, 오디오는 나중에 한 번에 입힘
 # ---------------------------------------------------------------------------
 
-def build_segment(image_path: str, audio_path: str, out_path: str) -> None:
-    duration = get_audio_duration(audio_path)
-
+def build_segment(image_path: str, duration: float, out_path: str) -> None:
     vf = (
         f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,"
         f"crop={VIDEO_WIDTH}:{VIDEO_HEIGHT}"
     )
-
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     run([
         "ffmpeg", "-y",
         "-loop", "1", "-i", image_path,
-        "-i", audio_path,
         "-vf", vf,
         "-t", str(duration),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-shortest",
+        "-an",
         out_path,
     ])
 
 
-# ---------------------------------------------------------------------------
-# 인트로 타이틀 카드
-# ---------------------------------------------------------------------------
-
 def build_title_card(title: str, out_path: str, duration: float) -> None:
-    """영상 시작 전에 짧게 보여줄 타이틀 카드(검은 배경 + 제목 텍스트)를 만든다."""
+    """영상 시작 전에 짧게 보여줄 타이틀 카드(검은 배경 + 제목 텍스트), 무음."""
     if not os.path.exists(FONT_PATH):
         raise SystemExit(
             f"{FONT_PATH} 가 없습니다. 한글 폰트 파일을 이 경로에 추가하세요 "
@@ -129,22 +117,15 @@ def build_title_card(title: str, out_path: str, duration: float) -> None:
         "ffmpeg", "-y",
         "-f", "lavfi",
         "-i", f"color=c={TITLE_CARD_BG_COLOR}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:d={duration}",
-        "-f", "lavfi",
-        "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100",
         "-vf", drawtext,
         "-t", str(duration),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-shortest",
+        "-an",
         out_path,
     ])
 
     os.unlink(title_file)
 
-
-# ---------------------------------------------------------------------------
-# 세그먼트 이어붙이기 + BGM 믹싱
-# ---------------------------------------------------------------------------
 
 def concat_segments(segment_paths: list[str], out_path: str) -> None:
     with tempfile.NamedTemporaryFile(
@@ -163,29 +144,40 @@ def concat_segments(segment_paths: list[str], out_path: str) -> None:
     os.unlink(list_file)
 
 
-def mix_bgm(video_path: str, out_path: str) -> None:
-    if not os.path.exists(BGM_PATH):
-        print("  BGM 파일이 없어 대사 오디오만으로 최종본을 만듭니다.")
-        run(["ffmpeg", "-y", "-i", video_path, "-c", "copy", out_path])
-        return
+def mux_narration(video_path: str, narration_path: str, delay_sec: float, out_path: str) -> None:
+    """무음 영상에 낭독 음성을 delay_sec 만큼 늦춰서 입히고, BGM이 있으면 같이 믹싱."""
+    total_duration = get_duration(video_path)
+    delay_ms = max(int(round(delay_sec * 1000)), 0)
 
-    total_duration = get_audio_duration(video_path)
-
-    filter_complex = (
-        f"[1:a]volume={BGM_VOLUME},atrim=0:{total_duration}[bgm];"
-        "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-    )
-
-    run([
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-stream_loop", "-1", "-i", BGM_PATH,
-        "-filter_complex", filter_complex,
-        "-map", "0:v", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "aac",
-        "-shortest",
-        out_path,
-    ])
+    if os.path.exists(BGM_PATH):
+        filter_complex = (
+            f"[1:a]adelay={delay_ms}|{delay_ms}[voice];"
+            f"[2:a]volume={BGM_VOLUME},atrim=0:{total_duration},aloop=loop=-1:size=2e9[bgm];"
+            "[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        )
+        run([
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", narration_path,
+            "-stream_loop", "-1", "-i", BGM_PATH,
+            "-filter_complex", filter_complex,
+            "-map", "0:v", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac",
+            "-shortest",
+            out_path,
+        ])
+    else:
+        filter_complex = f"[1:a]adelay={delay_ms}|{delay_ms}[aout]"
+        run([
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", narration_path,
+            "-filter_complex", filter_complex,
+            "-map", "0:v", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac",
+            "-shortest",
+            out_path,
+        ])
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +193,6 @@ def main():
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    # 인트로에 쓸 제목은 fetch_script.py가 만들어둔 script.json의 title을 그대로 쓴다
-    # (유튜브 업로드 제목과 통일하기 위해). 없으면 카드 없이 진행한다.
     script_path = SCRIPT_PATH_TEMPLATE.format(date=today)
     title = None
     if os.path.exists(script_path):
@@ -214,31 +204,33 @@ def main():
 
     segments_dir = SEGMENTS_DIR_TEMPLATE.format(date=today)
     segment_paths = []
+    lead_in = 0.0
 
     if title:
         print("인트로 타이틀 카드 렌더링 중...")
         title_card_path = os.path.join(segments_dir, "00_title.mp4")
         build_title_card(title, title_card_path, title_card_duration)
         segment_paths.append(title_card_path)
+        lead_in = title_card_duration
 
     for turn in manifest["turns"]:
         seg_path = os.path.join(segments_dir, f"{turn['index']:02d}.mp4")
         print(f"[{turn['index'] + 1}/{len(manifest['turns'])}] 세그먼트 렌더링: "
-              f"{turn['character_name']}")
+              f"{turn['character_name']} ({turn['duration']:.2f}초)")
         build_segment(
             image_path=turn["image_path"],
-            audio_path=turn["audio_path"],
+            duration=turn["duration"],
             out_path=seg_path,
         )
         segment_paths.append(seg_path)
 
     concat_path = os.path.join(segments_dir, "_concat.mp4")
-    print("세그먼트 이어붙이는 중...")
+    print("세그먼트 이어붙이는 중(무음)...")
     concat_segments(segment_paths, concat_path)
 
     final_path = FINAL_PATH_TEMPLATE.format(date=today)
-    print("BGM 믹싱 및 최종 렌더링 중...")
-    mix_bgm(concat_path, final_path)
+    print(f"낭독 음성 입히는 중 (시작 지연 {lead_in:.2f}초)...")
+    mux_narration(concat_path, manifest["narration_audio"], lead_in, final_path)
 
     print(f"완료: {final_path}")
 
