@@ -33,7 +33,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SCRIPT_PATH_TEMPLATE = "output/script_{date}.json"
 
 # ElevenLabs Rachel - 4명 전원 동일 목소리(비용 최소화를 위해 내레이터 1명 방식)
-VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+VOICE_ID = "n2fbxG88jqAoaVPUy3IG"
 
 CHARACTER_NAMES = {
     "reporter": "제보자",
