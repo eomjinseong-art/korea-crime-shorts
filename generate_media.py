@@ -111,22 +111,16 @@ def render_chat_frame(turns_so_far: list[dict], font, font_small, line_height) -
     draw = ImageDraw.Draw(img)
     draw_header(draw, get_font(40), get_font(26))
 
-    # 1) 뒤에서부터 버블을 쌓아가며, 위쪽 여백(FEED_TOP)을 넘어가기 전까지만 포함한다
-    #    (실제 채팅앱처럼 최신 메시지가 항상 화면에 보이도록 자동 스크롤 흉내)
+    # 첫 메시지가 화면 위쪽(FEED_TOP)에서 시작해서, 새 메시지가 그 아래로 순서대로
+    # 쌓이는 방식. 자동 스크롤 없음 - turn이 많아지면 마지막 몇 개는 화면 하단
+    # 밖으로 나갈 수 있음(에피소드당 turn 수가 많으면 주의).
     blocks = []
-    y_cursor = FEED_BOTTOM
-    for turn in reversed(turns_so_far):
+    for turn in turns_so_far:
         style = SPEAKER_STYLE[turn["speaker"]]
         lines, bubble_w, bubble_h = measure_bubble(draw, turn["line"], font, line_height)
-        block_h = bubble_h + BUBBLE_GAP
-        if y_cursor - block_h < FEED_TOP and blocks:
-            break
         blocks.append((turn, style, lines, bubble_w, bubble_h))
-        y_cursor -= block_h
-    blocks.reverse()
 
-    # 2) 실제로 위에서 아래로 그린다
-    y = max(y_cursor, FEED_TOP)
+    y = FEED_TOP
     for turn, style, lines, bubble_w, bubble_h in blocks:
         side = style["side"]
         if side == "center":
