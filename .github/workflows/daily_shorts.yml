@@ -7,7 +7,7 @@ on:
   workflow_dispatch: {}   # 수동 실행 버튼 (테스트/디버깅용)
 
 jobs:
-  # --- 1~5단계: 뉴스 수집부터 영상 조립까지. 여기까진 완전 자동. ---
+  # --- 1~5단계: 사연 가져오기부터 영상 조립까지. 여기까진 완전 자동. ---
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -21,26 +21,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: ffmpeg 설치
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: ffmpeg 및 한글 폰트 설치
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-nanum
 
       - name: 파이썬 의존성 설치
         run: pip install -r requirements.txt
 
-      - name: "1-2단계: 소스 수집 & 사실관계 추출"
+      - name: "1단계: 구글시트에서 사연 가져오기"
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python collect_news.py
-
-      - name: "3단계: 대화 대본 생성"
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python generate_script.py
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        run: python fetch_script.py
 
       - name: "4단계: 음성/이미지 생성"
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python generate_media.py
 
       - name: "5단계: 영상 조립 (ffmpeg)"
