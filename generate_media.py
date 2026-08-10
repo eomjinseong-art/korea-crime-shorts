@@ -1,13 +1,22 @@
 """
-1일 1쇼츠 자동화 파이프라인 - 4단계 신규: 음성/이미지 생성
+1일 1쇼츠 자동화 파이프라인 - 4단계: 음성/이미지 생성 (단일 낭독 방식)
 
-fetch_script.py가 만든 output/script_{date}.json(turns 배열)을 입력으로 받아,
-turn마다:
-  1) ElevenLabs로 그 줄의 대사를 TTS 음성 파일로 만들고
-  2) 그 시점까지의 카카오톡풍 채팅 화면을 PIL로 직접 그려서 이미지로 저장한다
-     (AI 이미지 생성 API를 쓰지 않으므로 이미지 생성 비용은 $0)
-turn별 image_path/audio_path를 채운 output/manifest_{date}.json을 출력한다.
-이 manifest.json은 기존 assemble_video.py가 그대로 읽어서 영상으로 조립한다.
+fetch_script.py가 만든 output/script_{date}.json을 입력으로 받는다.
+
+[방식] script["narration"] 전체를 ElevenLabs에 딱 한 번만 호출해서
+음성 파일 하나(narration.mp3)로 만든다(유니가 팟캐스트 진행자처럼
+전체를 이어서 낭독). 화면은 기존처럼 turn(말풍선) 단위로 카톡 UI를
+PIL로 그리되, 각 turn이 화면에 떠있는 시간은 그 turn의 weight_text
+길이가 전체 낭독 텍스트에서 차지하는 비율만큼을 전체 낭독 길이에서
+나눠 배분한다(정확한 단어 단위 타임스탬프는 아니지만 충분히 자연스러운
+근사치).
+
+출력: output/manifest_{date}.json
+  {
+    "narration_audio": "...",
+    "narration_duration": 12.3,
+    "turns": [{"index","image_path","duration","character_name","line"}, ...]
+  }
 
 필요 환경변수:
   ELEVENLABS_API_KEY
@@ -16,13 +25,13 @@ turn별 image_path/audio_path를 채운 output/manifest_{date}.json을 출력한
   pip install elevenlabs Pillow --break-system-packages
 
 필요 폰트(한글 렌더링):
-  시스템에 나눔고딕 등 한글 TTF가 있어야 한다.
-  GitHub Actions(ubuntu-latest)라면 워크플로에 다음 스텝 추가 필요:
+  GitHub Actions(ubuntu-latest) 워크플로에 다음 스텝 필요:
     sudo apt-get install -y fonts-nanum
 """
 
 import os
 import json
+import subprocess
 import datetime as dt
 
 from elevenlabs.client import ElevenLabs
@@ -36,11 +45,13 @@ SEGMENTS_DIR_TEMPLATE = "output/segments_{date}"
 W, H = 1080, 1920
 HEADER_H = 160
 FEED_TOP = HEADER_H + 40
-FEED_BOTTOM = H - 60  # 이 아래는 assemble_video.py가 자막(drawtext)을 그릴 여백으로 남겨둠
+FEED_BOTTOM = H - 60
 BUBBLE_MAX_WIDTH = 760
 BUBBLE_PADDING = 28
 BUBBLE_GAP = 22
 AVATAR_SIZE = 56
+
+MIN_TURN_DURATION = 1.2  # 아무리 짧아도 최소 이 정도는 화면에 보여줌(초)
 
 BG_COLOR = (247, 247, 245)
 HEADER_BG = (255, 255, 255)
@@ -74,6 +85,17 @@ def get_font(size: int) -> ImageFont.FreeTypeFont:
         "한글 TTF 폰트를 찾을 수 없습니다. "
         "GitHub Actions 워크플로에 'sudo apt-get install -y fonts-nanum' 스텝을 추가하세요."
     )
+
+
+def get_audio_duration(path: str) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe 실패: {result.stderr}")
+    return float(result.stdout.strip())
 
 
 def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
@@ -111,16 +133,31 @@ def render_chat_frame(turns_so_far: list[dict], font, font_small, line_height) -
     draw = ImageDraw.Draw(img)
     draw_header(draw, get_font(40), get_font(26))
 
-    # 첫 메시지가 화면 위쪽(FEED_TOP)에서 시작해서, 새 메시지가 그 아래로 순서대로
-    # 쌓이는 방식. 자동 스크롤 없음 - turn이 많아지면 마지막 몇 개는 화면 하단
-    # 밖으로 나갈 수 있음(에피소드당 turn 수가 많으면 주의).
-    blocks = []
+    all_blocks = []
     for turn in turns_so_far:
         style = SPEAKER_STYLE[turn["speaker"]]
         lines, bubble_w, bubble_h = measure_bubble(draw, turn["line"], font, line_height)
-        blocks.append((turn, style, lines, bubble_w, bubble_h))
+        all_blocks.append((turn, style, lines, bubble_w, bubble_h))
 
-    y = FEED_TOP
+    total_height = sum(b[4] + BUBBLE_GAP for b in all_blocks)
+    available_height = FEED_BOTTOM - FEED_TOP
+
+    if total_height <= available_height:
+        blocks = all_blocks
+        y_start = FEED_TOP
+    else:
+        blocks = []
+        y_cursor = FEED_BOTTOM
+        for turn, style, lines, bubble_w, bubble_h in reversed(all_blocks):
+            block_h = bubble_h + BUBBLE_GAP
+            if y_cursor - block_h < FEED_TOP and blocks:
+                break
+            blocks.append((turn, style, lines, bubble_w, bubble_h))
+            y_cursor -= block_h
+        blocks.reverse()
+        y_start = max(y_cursor, FEED_TOP)
+
+    y = y_start
     for turn, style, lines, bubble_w, bubble_h in blocks:
         side = style["side"]
         if side == "center":
@@ -165,6 +202,26 @@ def synth_audio(client: ElevenLabs, text: str, voice_id: str, out_path: str) -> 
     save(audio, out_path)
 
 
+def allocate_durations(turns: list[dict], total_duration: float) -> list[float]:
+    """turn별 weight_text 글자수 비율로 total_duration을 나눠 배분.
+    최소 MIN_TURN_DURATION은 보장하고, 남는/모자란 시간은 마지막 turn에서 보정."""
+    weights = [max(len(t["weight_text"]), 1) for t in turns]
+    total_weight = sum(weights)
+    raw = [total_duration * (w / total_weight) for w in weights]
+    durations = [max(d, MIN_TURN_DURATION) for d in raw]
+
+    # 최소값 보정으로 합계가 total_duration을 넘어가면, 넘는 만큼을 가장 긴 turn들에서 비례 차감
+    diff = sum(durations) - total_duration
+    if diff > 0:
+        adjustable_idx = [i for i, d in enumerate(durations) if d > MIN_TURN_DURATION]
+        adjustable_total = sum(durations[i] for i in adjustable_idx) or 1
+        for i in adjustable_idx:
+            durations[i] -= diff * (durations[i] / adjustable_total)
+        durations = [max(d, 0.4) for d in durations]
+
+    return durations
+
+
 def main():
     today = dt.date.today().isoformat()
     script_path = SCRIPT_PATH_TEMPLATE.format(date=today)
@@ -185,18 +242,26 @@ def main():
     os.makedirs(audio_dir, exist_ok=True)
     os.makedirs(image_dir, exist_ok=True)
 
+    # 1) 낭독 전체를 한 번에 TTS
+    print("낭독 음성 생성 중 (유니, 1회 호출)...")
+    narration_audio_path = os.path.join(audio_dir, "narration.mp3")
+    synth_audio(client, script["narration"], script["voice_id"], narration_audio_path)
+    total_duration = get_audio_duration(narration_audio_path)
+    print(f"낭독 길이: {total_duration:.2f}초")
+
+    # 2) turn별 표시 시간 배분
+    turns = script["turns"]
+    durations = allocate_durations(turns, total_duration)
+
+    # 3) turn별 누적 카톡 화면 렌더링
     font = get_font(36)
     font_small = get_font(24)
     line_height = 48
 
-    turns = script["turns"]
     manifest_turns = []
-
     for i, turn in enumerate(turns):
-        print(f"[{i + 1}/{len(turns)}] {turn['character_name'] or '질문'}: {turn['line'][:30]}...")
-
-        audio_path = os.path.join(audio_dir, f"{turn['index']:02d}.mp3")
-        synth_audio(client, turn["line"], turn["voice_id"], audio_path)
+        print(f"[{i + 1}/{len(turns)}] {turn['character_name'] or '질문'}: "
+              f"{turn['line'][:30]}... ({durations[i]:.2f}초)")
 
         image_path = os.path.join(image_dir, f"{turn['index']:02d}.png")
         frame = render_chat_frame(turns[: i + 1], font, font_small, line_height)
@@ -206,16 +271,21 @@ def main():
             "index": turn["index"],
             "character_name": turn["character_name"] or "질문",
             "line": turn["line"],
-            "audio_path": audio_path,
             "image_path": image_path,
+            "duration": durations[i],
         })
 
-    manifest = {"date": today, "turns": manifest_turns}
+    manifest = {
+        "date": today,
+        "narration_audio": narration_audio_path,
+        "narration_duration": total_duration,
+        "turns": manifest_turns,
+    }
     out_path = MANIFEST_PATH_TEMPLATE.format(date=today)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-    print(f"완료: {out_path} (turn {len(manifest_turns)}개)")
+    print(f"완료: {out_path} (turn {len(manifest_turns)}개, 낭독 {total_duration:.2f}초)")
 
 
 if __name__ == "__main__":
