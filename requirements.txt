@@ -1,6 +1,8 @@
-requests
-feedparser
 anthropic
-google-auth-oauthlib
-google-api-python-client
-gspread google-auth elevenlabs Pillow
+openai
+requests
+beautifulsoup4
+gspread
+google-auth
+elevenlabs
+Pillow
