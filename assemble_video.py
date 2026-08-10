@@ -35,7 +35,7 @@ FINAL_PATH_TEMPLATE = "output/final_{date}.mp4"
 CONFIG_PATH = "config.json"
 
 BGM_PATH = "assets/bgm.mp3"
-FONT_PATH = "assets/fonts/subtitle.ttf"
+FONT_PATH = "assets/subtitle.ttf"
 
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
