@@ -75,7 +75,7 @@ jobs:
         with:
           python-version: "3.11"
 
-     - name: 파이썬 의존성 설치 (업로드에 필요한 것만)
+      - name: 파이썬 의존성 설치 (업로드에 필요한 것만)
         run: pip install google-auth-oauthlib google-api-python-client requests Pillow
 
       - name: build job 산출물 받기
