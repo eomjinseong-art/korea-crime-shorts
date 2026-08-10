@@ -2,14 +2,21 @@
 1일 1쇼츠 자동화 파이프라인 - 6단계: 영상 조립
 
 generate_media.py가 만든 output/manifest_{date}.json (turn별 오디오/이미지 경로)을
-받아서, 각 turn을 이미지+음성+자막이 있는 세그먼트로 만들고 이어 붙인 뒤
+받아서, 각 turn을 이미지+음성이 있는 세그먼트로 만들고 이어 붙인 뒤
 배경음악(BGM)을 낮은 볼륨으로 섞어 최종 세로형(9:16) mp4를 만든다.
+
+[수정] 이미지 자체(generate_media.py가 PIL로 그린 카톡 화면)에 이미 대사
+텍스트가 들어있으므로, 여기서 별도 자막(drawtext)을 중복으로 그리지 않는다.
+예전 버전은 화면 중앙에 "화자명: 대사"를 drawtext로 한 번 더 그렸는데,
+그 폰트가 한글을 지원하지 않아 깨져 보였고 이미지 위에 겹쳐 보이는
+문제가 있었다. 인트로 타이틀 카드는 여전히 drawtext를 쓰므로
+assets/fonts/subtitle.ttf 에 실제 한글 폰트 파일이 있어야 한다.
 
 필요 프로그램: ffmpeg, ffprobe (PATH에 있어야 함)
 
 사전 준비물:
-  assets/bgm.mp3          - 배경음악 (없으면 BGM 없이 렌더링)
-  assets/fonts/subtitle.ttf - 자막 폰트 (없으면 시스템 기본 폰트 사용)
+  assets/bgm.mp3            - 배경음악 (없으면 BGM 없이 렌더링)
+  assets/fonts/subtitle.ttf - 한글 지원 폰트 (인트로 타이틀 카드용, 필수)
 
 출력:
   output/final_{date}.mp4
@@ -68,32 +75,15 @@ def get_audio_duration(audio_path: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 세그먼트(turn 하나) 렌더링
+# 세그먼트(turn 하나) 렌더링 - 이미지에 이미 텍스트가 있으므로 자막 없이 합성만
 # ---------------------------------------------------------------------------
 
-def build_segment(image_path: str, audio_path: str, line: str,
-                   character_name: str, out_path: str, subtitle_y_ratio: float) -> None:
+def build_segment(image_path: str, audio_path: str, out_path: str) -> None:
     duration = get_audio_duration(audio_path)
-
-    # drawtext에 특수문자(콜론, 따옴표 등) 이스케이프 문제를 피하려고
-    # 텍스트를 파일로 빼서 textfile= 옵션으로 넘긴다.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as tf:
-        tf.write(f"{character_name}: {line}")
-        subtitle_file = tf.name
-
-    fontfile_opt = f":fontfile={FONT_PATH}" if os.path.exists(FONT_PATH) else ""
-
-    drawtext = (
-        f"drawtext=textfile='{subtitle_file}'{fontfile_opt}:"
-        "fontsize=44:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=18:"
-        f"x=(w-text_w)/2:y=h*{subtitle_y_ratio}-text_h/2:line_spacing=8"
-    )
 
     vf = (
         f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={VIDEO_WIDTH}:{VIDEO_HEIGHT},{drawtext}"
+        f"crop={VIDEO_WIDTH}:{VIDEO_HEIGHT}"
     )
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -109,8 +99,6 @@ def build_segment(image_path: str, audio_path: str, line: str,
         out_path,
     ])
 
-    os.unlink(subtitle_file)
-
 
 # ---------------------------------------------------------------------------
 # 인트로 타이틀 카드
@@ -118,16 +106,20 @@ def build_segment(image_path: str, audio_path: str, line: str,
 
 def build_title_card(title: str, out_path: str, duration: float) -> None:
     """영상 시작 전에 짧게 보여줄 타이틀 카드(검은 배경 + 제목 텍스트)를 만든다."""
+    if not os.path.exists(FONT_PATH):
+        raise SystemExit(
+            f"{FONT_PATH} 가 없습니다. 한글 폰트 파일을 이 경로에 추가하세요 "
+            "(그렇지 않으면 타이틀 카드의 한글이 깨져 보입니다)."
+        )
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
     ) as tf:
         tf.write(title)
         title_file = tf.name
 
-    fontfile_opt = f":fontfile={FONT_PATH}" if os.path.exists(FONT_PATH) else ""
-
     drawtext = (
-        f"drawtext=textfile='{title_file}'{fontfile_opt}:"
+        f"drawtext=textfile='{title_file}':fontfile={FONT_PATH}:"
         "fontsize=56:fontcolor=white:box=0:"
         "x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=10"
     )
@@ -209,7 +201,7 @@ def main():
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    # 인트로에 쓸 제목은 generate_script.py가 만들어둔 script.json의 title을 그대로 쓴다
+    # 인트로에 쓸 제목은 fetch_script.py가 만들어둔 script.json의 title을 그대로 쓴다
     # (유튜브 업로드 제목과 통일하기 위해). 없으면 카드 없이 진행한다.
     script_path = SCRIPT_PATH_TEMPLATE.format(date=today)
     title = None
@@ -218,7 +210,6 @@ def main():
             title = json.load(f).get("title")
 
     config = load_config()
-    subtitle_y_ratio = config.get("subtitle_y_ratio", 0.5)
     title_card_duration = config.get("title_card_duration", 2.5)
 
     segments_dir = SEGMENTS_DIR_TEMPLATE.format(date=today)
@@ -232,15 +223,12 @@ def main():
 
     for turn in manifest["turns"]:
         seg_path = os.path.join(segments_dir, f"{turn['index']:02d}.mp4")
-        print(f"[{turn['index']+1}/{len(manifest['turns'])}] 세그먼트 렌더링: "
+        print(f"[{turn['index'] + 1}/{len(manifest['turns'])}] 세그먼트 렌더링: "
               f"{turn['character_name']}")
         build_segment(
             image_path=turn["image_path"],
             audio_path=turn["audio_path"],
-            line=turn["line"],
-            character_name=turn["character_name"],
             out_path=seg_path,
-            subtitle_y_ratio=subtitle_y_ratio,
         )
         segment_paths.append(seg_path)
 
