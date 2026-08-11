@@ -150,8 +150,11 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
-    # 처리한 행은 다음 실행 때 건너뛰도록 완료 처리
+    # 처리한 행은 다음 실행 때 건너뛰도록 완료 처리 + Status 셀을 초록색으로 표시
     ws.update_cell(row_index, 1, "완료")
+    ws.format(f"A{row_index}", {
+        "backgroundColor": {"red": 0.71, "green": 0.84, "blue": 0.66}
+    })
 
     print(f"완료: {out_path}")
     print(f"EP.{ep} {title_raw} - turn {len(turns)}개, 낭독 {len(narration)}자")
