@@ -7,7 +7,7 @@ on:
   workflow_dispatch: {}   # 수동 실행 버튼 (테스트/디버깅용)
 
 jobs:
-  # --- 1~5단계: 사연 가져오기부터 영상 조립까지. 여기까진 완전 자동. ---
+  # --- 0~5단계: 사연 재고 보충(조건부)부터 영상 조립까지. 여기까진 완전 자동. ---
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -26,6 +26,12 @@ jobs:
 
       - name: 파이썬 의존성 설치
         run: pip install -r requirements.txt
+
+      - name: "0단계: 사연 재고 자동 보충 (조건부)"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        run: python generate_more_stories.py
 
       - name: "1단계: 구글시트에서 사연 가져오기"
         env:
