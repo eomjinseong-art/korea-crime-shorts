@@ -4,6 +4,16 @@
 assemble_video.py가 만든 output/final_{date}.mp4 를 YouTube Shorts로 업로드하고,
 제목/설명/태그를 자동 생성한다. 실패 시 Slack(또는 지정한 웹훅)으로 알림을 보낸다.
 
+[수정 1] 날짜를 dt.date.today()로 새로 계산하지 않는다. build job과 upload job은
+서로 다른 시점(특히 승인 대기 중 자정을 넘기는 경우)에 실행될 수 있어서,
+"오늘 날짜"를 다시 계산하면 build가 실제로 만든 파일과 어긋난다. 대신
+output/final_*.mp4 를 직접 찾아서 그 파일명에서 날짜를 읽어온다.
+
+[수정 2] build_metadata()가 예전 "편의점 알바생 + 영어 해외채널" 버전 필드
+(customer_character_en, speaker=="customer")를 쓰고 있었는데, 지금 콘텐츠
+(언니삼총사 사연, 한국어)의 turns 구조와 안 맞아서 제목/설명 생성 코드를
+새로 작성했다.
+
 사전 준비물 (1회성, 사람이 직접 해야 하는 부분):
   1. Google Cloud Console에서 프로젝트 생성 -> YouTube Data API v3 활성화
   2. OAuth 2.0 클라이언트 ID(데스크톱 앱) 생성 -> client_secret.json 다운로드
@@ -12,20 +22,18 @@ assemble_video.py가 만든 output/final_{date}.mp4 를 YouTube Shorts로 업로
   4. token.json을 GitHub Actions 시크릿(예: YOUTUBE_TOKEN_JSON)으로 등록해서
      무인 자동화 시 재사용
 
-이 인증 단계는 보안상 사람이 최소 1회는 직접 브라우저로 로그인/승인해야 해서
-완전히 자동화할 수 없다. 그 이후부터는 refresh token으로 무인 갱신된다.
-
 필요 환경변수:
   SLACK_WEBHOOK_URL   (선택 - 실패 알림용. 없으면 콘솔에만 출력)
 
 필요 패키지:
-  pip install google-auth-oauthlib google-api-python-client --break-system-packages
+  pip install google-auth-oauthlib google-api-python-client Pillow --break-system-packages
 """
 
 import os
+import re
+import glob
 import json
 import textwrap
-import datetime as dt
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -44,13 +52,36 @@ FINAL_VIDEO_PATH_TEMPLATE = "output/final_{date}.mp4"
 SCRIPT_PATH_TEMPLATE = "output/script_{date}.json"
 THUMBNAIL_PATH_TEMPLATE = "output/thumbnail_{date}.png"
 
-CHANNEL_HASHTAGS = "#Korea #KoreaNews #ShortsNews"
+HASHTAGS = "#사연 #고민상담 #카톡썰 #언니들 #사이다"
 
 THUMBNAIL_SIZE = (1280, 720)  # 유튜브 권장 썸네일 해상도
 FONT_PATH_CANDIDATES = [
+    "assets/subtitle.ttf",
     "assets/fonts/subtitle.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
+
+
+# ---------------------------------------------------------------------------
+# 날짜/파일 찾기
+# ---------------------------------------------------------------------------
+
+def find_latest_date() -> str:
+    """output/final_*.mp4 파일명에서 날짜를 읽어온다(오늘 날짜를 새로 계산하지 않음).
+    build job이 실제로 만든 그 날짜를 그대로 쓰기 위함."""
+    paths = glob.glob(FINAL_VIDEO_PATH_TEMPLATE.format(date="*"))
+    dates = []
+    for p in paths:
+        m = re.search(r"final_(\d{4}-\d{2}-\d{2})\.mp4$", os.path.basename(p))
+        if m:
+            dates.append(m.group(1))
+    if not dates:
+        raise FileNotFoundError(
+            "output/final_*.mp4 파일을 찾을 수 없습니다. "
+            "assemble_video.py를 먼저 실행했는지, artifact가 정상적으로 전달됐는지 확인하세요."
+        )
+    return sorted(dates)[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -82,33 +113,27 @@ def get_credentials() -> Credentials:
 
 
 # ---------------------------------------------------------------------------
-# 제목/설명/태그 자동 생성
+# 제목/설명/태그 자동 생성 (언니삼총사 사연 콘텐츠용)
 # ---------------------------------------------------------------------------
 
 def build_metadata(script: dict) -> dict:
-    """제목/설명은 (한국어일 수 있는) facts가 아니라, 이미 영어로 만들어진
-    대사(script.json turns)에서 뽑는다. 해외 시청자 대상 채널이라 메타데이터에
-    한국어가 섞여 나오면 안 된다."""
-    lines = [t["line"] for t in script["turns"]]
-    customer_char = script.get("customer_character_en", "a regular")
+    title = script.get("title") or "언니들의 사연"
 
-    # 제목은 generate_script.py가 이미 만들어서 script.json에 저장해뒀다 -
-    # 6단계 인트로 타이틀 카드와 여기 업로드 제목이 서로 달라지지 않도록 그 값을 그대로 쓴다.
-    base_title = script.get("title")
-    if not base_title:
-        hook_line = next((t["line"] for t in script["turns"] if t["speaker"] == "customer"), lines[0])
-        base_title = hook_line.rstrip("?.! ") + "?"
-    title = f"{base_title} {CHANNEL_HASHTAGS.split()[0]}"
+    story_lines = [t["line"] for t in script["turns"] if t["speaker"] == "reporter"]
+    story_summary = " ".join(story_lines)
+    if len(story_summary) > 300:
+        story_summary = story_summary[:297] + "..."
 
-    transcript = "\n".join(f"- {l}" for l in lines)
+    question = next((t["line"] for t in script["turns"] if t["speaker"] == "question"), "")
+
     description = (
-        f"A late-night conversation at a Korean convenience store, with {customer_char}.\n\n"
-        f"{transcript}\n\n"
-        f"{CHANNEL_HASHTAGS}\n\n"
-        "This is a dramatized retelling based on public news reports. "
-        "Names and identifying details have been altered."
+        f"{story_summary}\n\n"
+        f"{question}\n\n"
+        "쓰레드에서 만난 언니들의 진짜 조언 💬\n\n"
+        f"{HASHTAGS}"
     )
-    tags = ["Korea", "Korea news", "shorts", "true story", "convenience store"]
+
+    tags = ["사연", "고민상담", "카톡썰", "언니들", "사이다", "썰", "인간관계"]
 
     return {"title": title, "description": description, "tags": tags}
 
@@ -121,19 +146,17 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
     for path in FONT_PATH_CANDIDATES:
         if os.path.exists(path):
             return ImageFont.truetype(path, size)
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:
-        return ImageFont.load_default()
+    raise SystemExit(
+        "썸네일용 한글 폰트를 찾을 수 없습니다. assets/subtitle.ttf 가 있는지 확인하세요."
+    )
 
 
 def build_thumbnail(title: str, out_path: str) -> None:
-    """썸네일에 뜰 제목 이미지를 만든다. 인트로 타이틀 카드와 같은 문구를 쓴다."""
     img = Image.new("RGB", THUMBNAIL_SIZE, color=(10, 10, 10))
     draw = ImageDraw.Draw(img)
 
     font = load_font(size=72)
-    wrapped_lines = textwrap.wrap(title, width=22)
+    wrapped_lines = textwrap.wrap(title, width=18)
 
     line_heights = []
     for line in wrapped_lines:
@@ -180,7 +203,7 @@ def upload_video(creds: Credentials, video_path: str, metadata: dict) -> str:
             "title": metadata["title"],
             "description": metadata["description"],
             "tags": metadata["tags"],
-            "categoryId": "25",  # News & Politics
+            "categoryId": "24",  # Entertainment
         },
         "status": {
             "privacyStatus": "public",
@@ -221,15 +244,15 @@ def notify_failure(stage: str, error: Exception) -> None:
 # ---------------------------------------------------------------------------
 
 def main():
-    today = dt.date.today().isoformat()
-    video_path = FINAL_VIDEO_PATH_TEMPLATE.format(date=today)
-    script_path = SCRIPT_PATH_TEMPLATE.format(date=today)
-
     try:
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"{video_path} 가 없습니다. assemble_video.py를 먼저 실행하세요.")
+        date = find_latest_date()
+        print(f"대상 날짜: {date}")
+
+        video_path = FINAL_VIDEO_PATH_TEMPLATE.format(date=date)
+        script_path = SCRIPT_PATH_TEMPLATE.format(date=date)
+
         if not os.path.exists(script_path):
-            raise FileNotFoundError(f"{script_path} 가 없습니다. generate_script.py를 먼저 실행하세요.")
+            raise FileNotFoundError(f"{script_path} 가 없습니다. fetch_script.py를 먼저 실행하세요.")
 
         with open(script_path, "r", encoding="utf-8") as f:
             script = json.load(f)
@@ -245,7 +268,7 @@ def main():
         video_id = upload_video(creds, video_path, metadata)
 
         print("[4/4] 썸네일 생성 및 설정 중...")
-        thumbnail_path = THUMBNAIL_PATH_TEMPLATE.format(date=today)
+        thumbnail_path = THUMBNAIL_PATH_TEMPLATE.format(date=date)
         build_thumbnail(script.get("title", metadata["title"]), thumbnail_path)
         set_thumbnail(creds, video_id, thumbnail_path)
 
