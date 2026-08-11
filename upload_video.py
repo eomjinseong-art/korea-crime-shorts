@@ -2,25 +2,31 @@
 1일 1쇼츠 자동화 파이프라인 - 7단계: YouTube 업로드 + 모니터링
 
 assemble_video.py가 만든 output/final_{date}.mp4 를 YouTube Shorts로 업로드하고,
-제목/설명/태그를 자동 생성한다. 실패 시 Slack(또는 지정한 웹훅)으로 알림을 보낸다.
+제목/설명/태그를 자동 생성한다. 업로드 직후 홍보용 댓글을 자동으로 달아준다.
+실패 시 Slack(또는 지정한 웹훅)으로 알림을 보낸다.
 
-[수정 1] 날짜를 dt.date.today()로 새로 계산하지 않는다. build job과 upload job은
-서로 다른 시점(특히 승인 대기 중 자정을 넘기는 경우)에 실행될 수 있어서,
-"오늘 날짜"를 다시 계산하면 build가 실제로 만든 파일과 어긋난다. 대신
-output/final_*.mp4 를 직접 찾아서 그 파일명에서 날짜를 읽어온다.
+[수정 1] 날짜를 dt.date.today()로 새로 계산하지 않는다. output/final_*.mp4 를
+직접 찾아서 그 파일명에서 날짜를 읽어온다 (build/upload job 시점 어긋남 방지).
 
-[수정 2] build_metadata()가 예전 "편의점 알바생 + 영어 해외채널" 버전 필드
-(customer_character_en, speaker=="customer")를 쓰고 있었는데, 지금 콘텐츠
-(언니삼총사 사연, 한국어)의 turns 구조와 안 맞아서 제목/설명 생성 코드를
-새로 작성했다.
+[수정 2] build_metadata()가 언니삼총사 사연(한국어) turns 구조에 맞게 제목/설명/
+태그를 생성하도록 재작성. 설명에 댓글 유도 문구 + 업로드 스케줄 안내 포함.
+
+[수정 3] 업로드 직후 홍보용 댓글을 자동으로 하나 게시한다(commentThreads.insert).
+주의: YouTube Data API는 댓글 게시까지만 지원하고, 댓글을 상단에 "고정"하는
+기능은 API로 제공되지 않는다(2026년 기준 공식 미지원). 고정은 유튜브 스튜디오에서
+사람이 직접 눌러야 한다 - 이 스크립트는 게시까지만 자동화하고, 고정하라는
+안내 메시지를 콘솔에 출력한다.
+댓글 게시에는 youtube.force-ssl 스코프가 필요하다. 기존에 youtube.upload +
+youtube.readonly 스코프로만 인증했다면, 이 스코프가 없어서 댓글 게시가
+실패할 수 있다(업로드 자체는 영향 없음, 댓글만 실패하고 넘어감) - 그 경우
+reauth_youtube.py를 force-ssl 스코프 포함 버전으로 다시 실행해서 재인증 필요.
 
 사전 준비물 (1회성, 사람이 직접 해야 하는 부분):
   1. Google Cloud Console에서 프로젝트 생성 -> YouTube Data API v3 활성화
-  2. OAuth 2.0 클라이언트 ID(데스크톱 앱) 생성 -> client_secret.json 다운로드
-  3. 이 스크립트를 로컬에서 한 번 실행해서 브라우저 인증을 완료하면
+  2. OAuth 2.0 클라이언트 ID 생성 -> client_secret.json 다운로드
+  3. reauth_youtube.py를 로컬에서 한 번 실행해서 브라우저 인증을 완료하면
      token.json이 생성됨 (refresh token 포함)
-  4. token.json을 GitHub Actions 시크릿(예: YOUTUBE_TOKEN_JSON)으로 등록해서
-     무인 자동화 시 재사용
+  4. token.json을 GitHub Actions 시크릿(YOUTUBE_TOKEN_JSON)으로 등록
 
 필요 환경변수:
   SLACK_WEBHOOK_URL   (선택 - 실패 알림용. 없으면 콘솔에만 출력)
@@ -43,7 +49,11 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/youtube.force-ssl",  # 댓글 게시에 필요
+]
 
 CLIENT_SECRET_PATH = "client_secret.json"
 TOKEN_PATH = "token.json"
@@ -53,6 +63,14 @@ SCRIPT_PATH_TEMPLATE = "output/script_{date}.json"
 THUMBNAIL_PATH_TEMPLATE = "output/thumbnail_{date}.png"
 
 HASHTAGS = "#사연 #고민상담 #카톡썰 #언니들 #사이다"
+
+SCHEDULE_NOTE = "매일 오전 9시 · 오후 6시 · 오후 9시 새 사연 올라옵니다"
+
+PINNED_COMMENT_TEMPLATE = (
+    "오늘 사연 어떠셨나요? 여러분이라면 어떻게 하셨을 것 같아요? 👇\n"
+    "비슷한 사연 있으면 댓글로 남겨주세요, 다음 에피소드 소재로 쓸 수도 있어요!\n"
+    "매일 오전 9시·오후 6시·오후 9시 새 사연 올라옵니다 🔔"
+)
 
 THUMBNAIL_SIZE = (1280, 720)  # 유튜브 권장 썸네일 해상도
 FONT_PATH_CANDIDATES = [
@@ -68,8 +86,6 @@ FONT_PATH_CANDIDATES = [
 # ---------------------------------------------------------------------------
 
 def find_latest_date() -> str:
-    """output/final_*.mp4 파일명에서 날짜를 읽어온다(오늘 날짜를 새로 계산하지 않음).
-    build job이 실제로 만든 그 날짜를 그대로 쓰기 위함."""
     paths = glob.glob(FINAL_VIDEO_PATH_TEMPLATE.format(date="*"))
     dates = []
     for p in paths:
@@ -129,7 +145,8 @@ def build_metadata(script: dict) -> dict:
     description = (
         f"{story_summary}\n\n"
         f"{question}\n\n"
-        "쓰레드에서 만난 언니들의 진짜 조언 💬\n\n"
+        "여러분 생각은 댓글로 알려주세요 👇\n"
+        f"{SCHEDULE_NOTE}\n\n"
         f"{HASHTAGS}"
     )
 
@@ -189,6 +206,31 @@ def set_thumbnail(creds: Credentials, video_id: str, thumbnail_path: str) -> Non
         ).execute()
     except Exception as e:
         print(f"  [경고] 썸네일 설정 실패 (채널 전화번호 인증이 안 되어 있을 수 있습니다): {e}")
+
+
+# ---------------------------------------------------------------------------
+# 홍보용 댓글 자동 게시 (고정은 API 미지원 - 수동 필요)
+# ---------------------------------------------------------------------------
+
+def post_pinned_style_comment(creds: Credentials, video_id: str, text: str) -> None:
+    """업로드된 영상에 홍보용 댓글을 게시한다. 상단 고정은 YouTube Data API로
+    지원되지 않아서 자동화할 수 없다 - 게시까지만 하고, 고정은 사람이 유튜브
+    스튜디오에서 직접 눌러야 한다."""
+    youtube = build("youtube", "v3", credentials=creds)
+    try:
+        youtube.commentThreads().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "videoId": video_id,
+                    "topLevelComment": {"snippet": {"textOriginal": text}},
+                }
+            },
+        ).execute()
+        print("  댓글 게시 완료. ※ 상단 고정은 유튜브 스튜디오에서 직접 눌러주세요"
+              " (API로 자동 고정은 지원되지 않습니다).")
+    except Exception as e:
+        print(f"  [경고] 댓글 게시 실패 (force-ssl 스코프로 재인증이 필요할 수 있습니다): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -257,20 +299,23 @@ def main():
         with open(script_path, "r", encoding="utf-8") as f:
             script = json.load(f)
 
-        print("[1/4] YouTube 인증 중...")
+        print("[1/5] YouTube 인증 중...")
         creds = get_credentials()
 
-        print("[2/4] 메타데이터(제목/설명/태그) 생성 중...")
+        print("[2/5] 메타데이터(제목/설명/태그) 생성 중...")
         metadata = build_metadata(script)
         print(f"  제목: {metadata['title']}")
 
-        print("[3/4] 업로드 중...")
+        print("[3/5] 업로드 중...")
         video_id = upload_video(creds, video_path, metadata)
 
-        print("[4/4] 썸네일 생성 및 설정 중...")
+        print("[4/5] 썸네일 생성 및 설정 중...")
         thumbnail_path = THUMBNAIL_PATH_TEMPLATE.format(date=date)
         build_thumbnail(script.get("title", metadata["title"]), thumbnail_path)
         set_thumbnail(creds, video_id, thumbnail_path)
+
+        print("[5/5] 홍보용 댓글 게시 중...")
+        post_pinned_style_comment(creds, video_id, PINNED_COMMENT_TEMPLATE)
 
         print(f"완료: https://youtube.com/shorts/{video_id}")
 
