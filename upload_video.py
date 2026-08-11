@@ -1,8 +1,10 @@
 """
-1일 1쇼츠 자동화 파이프라인 - 7단계: YouTube 업로드 + 모니터링
+1일 1쇼츠 자동화 파이프라인 - 7단계: YouTube 업로드 + 모니터링 + 스레드 동시 포스팅
 
 assemble_video.py가 만든 output/final_{date}.mp4 를 YouTube Shorts로 업로드하고,
 제목/설명/태그를 자동 생성한다. 업로드 직후 홍보용 댓글을 자동으로 달아준다.
+유튜브 업로드가 "성공한 경우에만" 같은 회차 나레이션을 스레드(Threads)에도
+그대로 올린다(영상 링크는 넣지 않음 - 사용자 요청).
 실패 시 Slack(또는 지정한 웹훅)으로 알림을 보낸다.
 
 [수정 1] 날짜를 dt.date.today()로 새로 계산하지 않는다. output/final_*.mp4 를
@@ -21,18 +23,32 @@ youtube.readonly 스코프로만 인증했다면, 이 스코프가 없어서 댓
 실패할 수 있다(업로드 자체는 영향 없음, 댓글만 실패하고 넘어감) - 그 경우
 reauth_youtube.py를 force-ssl 스코프 포함 버전으로 다시 실행해서 재인증 필요.
 
+[수정 4] 유튜브 업로드가 성공한 "직후에만" 스레드에도 글을 올린다. 별도
+스케줄이나 별도 실행 시점이 아니라, 같은 스크립트/같은 실행 흐름 안에서
+처리한다 - 이렇게 해야 유튜브 업로드가 실패하거나 승인이 안 났을 때
+스레드에만 먼저 글이 나가는 상황이 생기지 않는다.
+글 내용은 script.json의 narration(팟캐스트 낭독 원문)을 그대로 옮기고,
+별도로 다시 쓰지 않는다. 영상 링크는 포함하지 않는다(사용자 요청).
+스레드 게시가 실패해도 유튜브 업로드 자체는 이미 끝난 뒤라 예외를 던지지
+않고 경고만 출력한다.
+
 사전 준비물 (1회성, 사람이 직접 해야 하는 부분):
   1. Google Cloud Console에서 프로젝트 생성 -> YouTube Data API v3 활성화
   2. OAuth 2.0 클라이언트 ID 생성 -> client_secret.json 다운로드
   3. reauth_youtube.py를 로컬에서 한 번 실행해서 브라우저 인증을 완료하면
      token.json이 생성됨 (refresh token 포함)
   4. token.json을 GitHub Actions 시크릿(YOUTUBE_TOKEN_JSON)으로 등록
+  5. reauth_threads.py로 스레드 인증을 완료하면 threads_token.json이 생성됨
+  6. 그 안의 access_token/user_id를 GitHub Secret(THREADS_ACCESS_TOKEN,
+     THREADS_USER_ID)으로 등록
 
 필요 환경변수:
-  SLACK_WEBHOOK_URL   (선택 - 실패 알림용. 없으면 콘솔에만 출력)
+  SLACK_WEBHOOK_URL      (선택 - 실패 알림용. 없으면 콘솔에만 출력)
+  THREADS_ACCESS_TOKEN   (선택 - 없으면 스레드 포스팅은 건너뜀)
+  THREADS_USER_ID        (선택 - 없으면 스레드 포스팅은 건너뜀)
 
 필요 패키지:
-  pip install google-auth-oauthlib google-api-python-client Pillow --break-system-packages
+  pip install google-auth-oauthlib google-api-python-client Pillow requests --break-system-packages
 """
 
 import os
@@ -48,6 +64,9 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+THREADS_API_BASE = "https://graph.threads.net/v1.0"
+THREADS_MAX_CHARS = 500
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
@@ -266,6 +285,52 @@ def upload_video(creds: Credentials, video_path: str, metadata: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 스레드(Threads) 포스팅 - 유튜브 업로드 성공 후에만 호출됨, 실패해도 무시
+# ---------------------------------------------------------------------------
+
+def build_threads_text(script: dict) -> str:
+    """script.json의 narration(팟캐스트 낭독 원문)을 그대로 옮긴다. 재작성 없음,
+    영상 링크 없음. 500자 넘으면 뒤를 잘라서 맞춘다."""
+    text = script.get("narration", "")
+    if len(text) <= THREADS_MAX_CHARS:
+        return text
+    return text[: THREADS_MAX_CHARS - 3] + "..."
+
+
+def post_to_threads(text: str) -> None:
+    access_token = os.environ.get("THREADS_ACCESS_TOKEN")
+    user_id = os.environ.get("THREADS_USER_ID")
+    if not access_token or not user_id:
+        print("  [안내] THREADS_ACCESS_TOKEN/THREADS_USER_ID 없음 - 스레드 포스팅 건너뜀.")
+        return
+
+    try:
+        create_resp = requests.post(
+            f"{THREADS_API_BASE}/{user_id}/threads",
+            data={"media_type": "TEXT", "text": text, "access_token": access_token},
+            timeout=30,
+        )
+        create_data = create_resp.json()
+        if "id" not in create_data:
+            print(f"  [경고] 스레드 컨테이너 생성 실패: {create_data}")
+            return
+
+        publish_resp = requests.post(
+            f"{THREADS_API_BASE}/{user_id}/threads_publish",
+            data={"creation_id": create_data["id"], "access_token": access_token},
+            timeout=30,
+        )
+        publish_data = publish_resp.json()
+        if "id" not in publish_data:
+            print(f"  [경고] 스레드 퍼블리시 실패: {publish_data}")
+            return
+
+        print(f"  스레드 게시 완료 (게시물 ID: {publish_data['id']})")
+    except Exception as e:
+        print(f"  [경고] 스레드 포스팅 중 오류(무시하고 계속): {e}")
+
+
+# ---------------------------------------------------------------------------
 # 실패 알림
 # ---------------------------------------------------------------------------
 
@@ -314,8 +379,12 @@ def main():
         build_thumbnail(script.get("title", metadata["title"]), thumbnail_path)
         set_thumbnail(creds, video_id, thumbnail_path)
 
-        print("[5/5] 홍보용 댓글 게시 중...")
+        print("[5/6] 홍보용 댓글 게시 중...")
         post_pinned_style_comment(creds, video_id, PINNED_COMMENT_TEMPLATE)
+
+        print("[6/6] 스레드 포스팅 중...")
+        threads_text = build_threads_text(script)
+        post_to_threads(threads_text)
 
         print(f"완료: https://youtube.com/shorts/{video_id}")
 
